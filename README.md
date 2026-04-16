@@ -50,10 +50,10 @@ gcloud services enable aiplatform.googleapis.com
 
 ### Getting help
 
-If you hit an issue, open a GitHub Issue against this repo or reach out to the PTA Co-Innovation Team directly.
+If you hit an issue, open a GitHub Issue against this repo. There are no SLAs, but we will do what we can to fix any issues.
 
 ---
 
 ## 🤝 The Partnership
 
-This repository reflects a collaborative effort to combine **Anthropic's** leadership in safe, frontier AI research with **Google Cloud's** secure, scalable, and high-performance global infrastructure. Together we deliver Claude to enterprises through **Vertex AI**, **Agentspace**, and the broader Google Cloud ecosystem.
+This repository reflects a collaborative effort to combine **Anthropic's** leadership in safe, frontier AI research with **Google Cloud's** secure, scalable, and high-performance global infrastructure. Together we deliver Claude to enterprises through **Vertex AI**, **Gemini Enterprise**, and the broader Google Cloud ecosystem.
