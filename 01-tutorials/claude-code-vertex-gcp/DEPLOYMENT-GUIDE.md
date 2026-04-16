@@ -54,7 +54,8 @@ When this procedure completes your GCP project will contain:
 - *(optional)* A **Dev VM** on GCE — shared cloud dev environment
   reached via IAP TCP tunnel.
 - *(optional)* An **observability pipeline** — log sink to BigQuery
-  feeding a Looker Studio dashboard template.
+  with a built-in admin dashboard showing usage, callers, errors,
+  and latency.
 - Supporting infrastructure — custom VPC with Private Google Access,
   Artifact Registry repository, dedicated service accounts with
   least-privilege IAM, and IAP firewall rules.
@@ -428,10 +429,10 @@ The developer then runs `claude` and is on Vertex.
 
 ## 9. Demo and monitoring
 
-### 9.1 Populate the Looker dashboard
+### 9.1 Populate the admin dashboard
 
-A fresh deployment has an empty Looker Studio dashboard. To seed it
-with realistic-looking traffic:
+A fresh deployment has an empty dashboard. To seed it with
+realistic-looking traffic:
 
 ```bash
 ./scripts/seed-demo-data.sh --users 5 --requests-per-user 10 --duration-minutes 15
@@ -450,9 +451,10 @@ Cost safety:
 
 Give Cloud Logging ~60 seconds to flush, then open the dashboard.
 
-### 9.2 Build the Looker Studio dashboard
+### 9.2 (Optional) Build a Looker Studio dashboard
 
-Follow
+The built-in admin dashboard covers most use cases. If you need a
+more customizable dashboard, follow
 [observability/looker-studio-template.md](../../05-solution-accelerators/claude-code-vertex-gcp/observability/looker-studio-template.md).
 Approximately 10 minutes:
 
