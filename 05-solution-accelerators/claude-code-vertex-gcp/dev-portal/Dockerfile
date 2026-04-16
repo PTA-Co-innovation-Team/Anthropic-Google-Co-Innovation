@@ -20,27 +20,8 @@ RUN rm -f /etc/nginx/conf.d/default.conf
 #
 # IMPORTANT: The envsubst is limited to $NGINX_ENVSUBST_TEMPLATE_VARS by
 # default (all env vars). We only reference $PORT.
-#
-# We use a shell heredoc inside RUN (not a Dockerfile COPY heredoc) for
-# compatibility with builders that don't support BuildKit.
-RUN mkdir -p /etc/nginx/templates && \
-    cat > /etc/nginx/templates/default.conf.template << 'NGINX_CONF'
-server {
-    listen       ${PORT};
-    server_name  _;
-    server_tokens off;
-    root   /usr/share/nginx/html;
-    index  index.html;
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-    location = /healthz {
-        access_log off;
-        return 200 'ok';
-        add_header Content-Type text/plain;
-    }
-}
-NGINX_CONF
+RUN mkdir -p /etc/nginx/templates
+COPY default.conf.template /etc/nginx/templates/default.conf.template
 
 # Copy the static site. The deploy script runs envsubst over
 # index.html BEFORE building the image, so URL placeholders
