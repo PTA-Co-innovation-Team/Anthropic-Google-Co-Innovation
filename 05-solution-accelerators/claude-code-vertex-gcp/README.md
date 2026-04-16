@@ -165,6 +165,10 @@ Open [`01-tutorials/claude-code-vertex-gcp/deploy.ipynb`](../../01-tutorials/cla
 step through the cells. Best option if you want to see each step and its
 output without installing anything locally.
 
+> The notebook is **fully self-contained** — all source code (Dockerfiles,
+> Python services, HTML) is embedded directly in the cells. No git clone
+> required.
+
 ---
 
 ## After deployment: point Claude Code at your gateway
