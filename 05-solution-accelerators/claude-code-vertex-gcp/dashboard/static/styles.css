@@ -1,0 +1,126 @@
+/* Admin Dashboard styles — extends the dev-portal design system. */
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               Helvetica, Arial, sans-serif;
+  color: #202124;
+  background: #f8f9fa;
+  line-height: 1.5;
+}
+
+.wrap {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 24px 96px;
+}
+
+header { margin-bottom: 24px; }
+header h1 {
+  font-size: 1.8rem;
+  margin: 0 0 4px;
+  color: #1a73e8;
+}
+.subtitle {
+  color: #5f6368;
+  font-size: 0.95rem;
+  margin: 0;
+}
+.refresh-info {
+  color: #80868b;
+  font-size: 0.8rem;
+  margin-top: 4px;
+}
+
+/* Dashboard grid */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.full-width { grid-column: 1 / -1; }
+
+/* Cards */
+.card {
+  background: #fff;
+  border: 1px solid #dadce0;
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 1px 2px rgba(60, 64, 67, 0.08);
+}
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  color: #202124;
+}
+
+/* Scorecards */
+.scorecard-row {
+  display: flex;
+  gap: 20px;
+  justify-content: space-around;
+}
+.scorecard {
+  text-align: center;
+  flex: 1;
+}
+.scorecard .value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #1a73e8;
+}
+.scorecard .label {
+  font-size: 0.85rem;
+  color: #5f6368;
+  margin-top: 2px;
+}
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+th {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 2px solid #dadce0;
+  color: #5f6368;
+  font-weight: 600;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+td {
+  padding: 7px 10px;
+  border-bottom: 1px solid #f1f3f4;
+}
+tr:hover td { background: #f8f9fa; }
+
+.status-ok { color: #1e8e3e; }
+.status-err { color: #d93025; }
+
+/* Empty state */
+.empty-state {
+  text-align: center;
+  color: #80868b;
+  padding: 40px 20px;
+  font-size: 0.95rem;
+}
+
+/* Chart containers */
+canvas { max-height: 280px; }
+
+/* Links */
+a { color: #1a73e8; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .wrap { padding: 16px 12px 48px; }
+  .dashboard-grid { grid-template-columns: 1fr; }
+  header h1 { font-size: 1.4rem; }
+  .scorecard .value { font-size: 1.5rem; }
+}
