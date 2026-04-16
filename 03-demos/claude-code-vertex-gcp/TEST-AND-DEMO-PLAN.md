@@ -88,7 +88,7 @@ infrastructure, paid to their GCP bill, with their identities.
 | 0:00 | **The setup** | Open the dev portal in a browser. "Here's the self-service page. A new developer hits this URL and is done in 3 commands." |
 | 0:30 | **The handshake** | Live-run `developer-setup.sh` on a laptop. Point out: no API keys, just ADC. Show the resulting `~/.claude/settings.json`. |
 | 1:30 | **The request** | Start `claude`, ask for a code change. Observe response latency. |
-| 2:00 | **The receipts** | Open the Looker Studio dashboard (ideally pre-seeded via `scripts/seed-demo-data.sh` — empty charts ruin the narrative). Point to: the user's own email in "top callers", Vertex region in the host breakdown, zero entries in the "betas stripped" panel. |
+| 2:00 | **The receipts** | Open the admin dashboard (ideally pre-seeded via `scripts/seed-demo-data.sh` — empty charts ruin the narrative). Point to: the user's own email in "top callers", Vertex region in the host breakdown, zero entries in the "betas stripped" panel. |
 | 3:30 | **The proof** | In a second browser tab, try the same request from an **unauthenticated** curl against the gateway URL — show it returns 403. Mention Layer 6 coverage. |
 | 4:30 | **The invoice** | Show the GCP billing page filtered to Vertex AI. "Every Claude token is on this invoice. No second vendor relationship." |
 
