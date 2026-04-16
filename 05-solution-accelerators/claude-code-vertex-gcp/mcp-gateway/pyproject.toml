@@ -32,7 +32,9 @@ dependencies = [
 
   # google-auth for Application Default Credentials. Used by the example
   # gcp_project_info tool and almost certainly by any real tool you add.
+  # requests is required by google.auth.transport.requests.
   "google-auth>=2.34,<3.0",
+  "requests>=2.31,<3.0",
 ]
 
 [project.optional-dependencies]
