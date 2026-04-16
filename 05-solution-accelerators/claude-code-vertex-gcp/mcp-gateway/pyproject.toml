@@ -1,0 +1,45 @@
+# -----------------------------------------------------------------------------
+# pyproject.toml for the MCP gateway.
+#
+# We use `uv` as the package manager + lockfile tool because it is what the
+# official Google MCP-on-Cloud-Run pattern uses, and it's dramatically faster
+# than pip for container builds. Compatible with the standard PEP 621
+# metadata here, so `pip install .` also works as a fallback.
+# -----------------------------------------------------------------------------
+
+[project]
+name = "claude-code-gcp-mcp-gateway"
+version = "0.1.0"
+description = "MCP gateway hosting shared tools for Claude Code on GCP."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+# Runtime dependencies. Keep this set small — tools that need extra
+# libraries (e.g., google-cloud-storage) can add them here.
+dependencies = [
+  # FastMCP is the MCP server library. Pinned to a recent minor; the
+  # Streamable HTTP transport is stable in 0.2+. FastMCP 2.x exposes
+  # http_app(); older versions fall back to streamable_http_app() —
+  # server.py handles both.
+  "fastmcp>=0.2,<3.0",
+
+  # FastAPI + uvicorn host the composition: /health at root, FastMCP
+  # mounted at /mcp. FastMCP itself pulls in Starlette already; we list
+  # FastAPI explicitly so this dep is obvious.
+  "fastapi>=0.115,<0.120",
+  "uvicorn[standard]>=0.32,<0.40",
+
+  # google-auth for Application Default Credentials. Used by the example
+  # gcp_project_info tool and almost certainly by any real tool you add.
+  "google-auth>=2.34,<3.0",
+]
+
+[project.optional-dependencies]
+# Dev extras: pytest for smoke testing a tool in isolation.
+dev = [
+  "pytest>=8,<9",
+]
+
+# `uv` uses the standard [tool.uv] section for its own knobs (index URL,
+# sync settings, etc.). We don't need anything custom here today.
