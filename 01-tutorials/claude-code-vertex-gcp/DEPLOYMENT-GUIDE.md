@@ -283,7 +283,7 @@ cd ..
 
 ---
 
-## 6. Path D — Jupyter notebook
+## 6. Path D — Jupyter notebook (self-contained)
 
 ### 6.1 Open the notebook
 
@@ -294,21 +294,28 @@ cd ..
 - In **Vertex Workbench**: clone the repository into your workbench
   instance and open `01-tutorials/claude-code-vertex-gcp/deploy.ipynb`.
 
+> **Self-contained.** The notebook embeds all source code (Dockerfiles,
+> Python services, HTML, CSS) directly in its cells. It does **not**
+> require cloning this repository — just open the notebook and run.
+
 ### 6.2 Step through the cells
 
-The notebook has 26 cells (12 code, 14 markdown) covering:
+The notebook has 28 cells (14 code, 14 markdown) covering:
 
 1. Settings — edit project ID, region, component toggles, allowed
    principals directly in the code cell.
 2. Authentication — Colab-aware `authenticate_user()` helper,
-   `gcloud config set project`.
+   `gcloud config set project`, helper functions.
 3. API enablement.
-4. Repository clone to the Colab VM.
-5. Environment export.
-6. **Explicit input() confirmation** — last chance to back out.
-7–10. Component deploys (LLM / MCP / portal / optional VM).
-11. Deployment summary with all URLs and the SSH command.
-12. Teardown (commented out by default).
+4. **Explicit input() confirmation** — last chance to back out.
+5. Artifact Registry creation (shared across all components).
+6–7. LLM Gateway — writes source files to a temp dir, builds and deploys.
+8–9. MCP Gateway — writes source files, builds and deploys.
+10–11. Dev Portal — writes source files with URL substitution, builds and deploys.
+12–13. Dev VM (optional) — renders startup script, creates GCE instance.
+14. Deployment summary with all URLs and the SSH command.
+15. Teardown (commented out by default).
+16. Temp file cleanup.
 
 ### 6.3 Validate
 
