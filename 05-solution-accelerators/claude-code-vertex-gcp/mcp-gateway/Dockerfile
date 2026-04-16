@@ -29,8 +29,9 @@ WORKDIR /app
 # this layer across code-only changes.
 COPY pyproject.toml ./
 # The lockfile is optional; if absent, uv will produce one during sync.
-# We tolerate either case with a wildcard glob.
-COPY uv.lock* ./
+# Using a two-file COPY with pyproject.toml (which already exists) ensures
+# the command never fails when uv.lock is missing.
+COPY pyproject.toml uv.lock* ./
 
 # Pre-fetch dependencies WITHOUT the project source. This keeps the
 # dependency layer independent of source changes.
