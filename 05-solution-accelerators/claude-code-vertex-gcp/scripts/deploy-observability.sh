@@ -26,7 +26,6 @@ parse_common_flags "$@"
 : "${PRINCIPALS:=}"
 
 require_cmd gcloud
-require_cmd bq
 
 REPO_ROOT="$(resolve_repo_root)"
 
@@ -41,17 +40,24 @@ IMAGE_TAG="$(date -u +%Y%m%d-%H%M%S)"
 IMAGE="${CR_REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${IMAGE_TAG}"
 
 # --- BigQuery dataset (idempotent) ------------------------------------------
+# Uses the BigQuery REST API directly via gcloud access tokens for
+# compatibility with corporate proxies / enterprise certificate setups
+# (the bq CLI has known issues with ECP proxies).
 log_step "ensure BigQuery dataset ${DATASET_ID}"
-if bq show --project_id "${PROJECT_ID}" "${PROJECT_ID}:${DATASET_ID}" >/dev/null 2>&1; then
+_bq_token="$(gcloud auth print-access-token 2>/dev/null)"
+_ds_check="$(curl -sS -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer ${_bq_token}" \
+  "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/${DATASET_ID}" 2>/dev/null)"
+
+if [[ "${_ds_check}" == "200" ]]; then
   log_info "dataset ${DATASET_ID} already exists"
 else
-  run_cmd bq mk \
-    --project_id "${PROJECT_ID}" \
-    --location "${CR_REGION}" \
-    --dataset \
-    --default_table_expiration 0 \
-    --description "Claude Code gateway logs" \
-    "${PROJECT_ID}:${DATASET_ID}"
+  log_info "creating dataset ${DATASET_ID}"
+  run_cmd curl -sS -X POST \
+    -H "Authorization: Bearer ${_bq_token}" \
+    -H "Content-Type: application/json" \
+    "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets" \
+    -d "{\"datasetReference\":{\"datasetId\":\"${DATASET_ID}\",\"projectId\":\"${PROJECT_ID}\"},\"location\":\"${CR_REGION}\",\"description\":\"Claude Code gateway logs\"}"
 fi
 
 # --- Cloud Logging sink (idempotent) ----------------------------------------
