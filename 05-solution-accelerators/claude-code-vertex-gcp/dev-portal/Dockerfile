@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # =============================================================================
 # Dev Portal — nginx-served static site.
 #
@@ -21,36 +20,27 @@ RUN rm -f /etc/nginx/conf.d/default.conf
 #
 # IMPORTANT: The envsubst is limited to $NGINX_ENVSUBST_TEMPLATE_VARS by
 # default (all env vars). We only reference $PORT.
-RUN mkdir -p /etc/nginx/templates
-COPY <<'EOF' /etc/nginx/templates/default.conf.template
+#
+# We use a shell heredoc inside RUN (not a Dockerfile COPY heredoc) for
+# compatibility with builders that don't support BuildKit.
+RUN mkdir -p /etc/nginx/templates && \
+    cat > /etc/nginx/templates/default.conf.template << 'NGINX_CONF'
 server {
-    # Cloud Run sets PORT. The envsubst step replaces ${PORT} at
-    # container startup.
     listen       ${PORT};
     server_name  _;
-
-    # Disable the version in Server headers — small opsec win.
     server_tokens off;
-
-    # Site root is baked into the image (see COPY below).
     root   /usr/share/nginx/html;
     index  index.html;
-
-    # Serve files; fall through to index.html on 404 so SPA-style
-    # deep links still work if anyone adds client-side routing later.
     location / {
         try_files $uri $uri/ /index.html;
     }
-
-    # A tiny healthcheck for Cloud Run probes. Must come before the
-    # static handler so it's not intercepted by try_files.
     location = /healthz {
         access_log off;
         return 200 'ok';
         add_header Content-Type text/plain;
     }
 }
-EOF
+NGINX_CONF
 
 # Copy the static site. The deploy script runs envsubst over
 # index.html BEFORE building the image, so URL placeholders
