@@ -109,6 +109,45 @@ with `4003: failed to connect to backend`.
 
 ---
 
+## Dev VM is missing after `deploy.sh` completed
+
+**Symptom.** `config.yaml` has `components.dev_vm: true` and the main
+`deploy.sh` ran without visible errors, but `gcloud compute instances list`
+shows no `claude-code-dev-shared` instance and the service account
+`claude-code-dev-vm@<project>.iam.gserviceaccount.com` does not exist.
+
+**Cause.** `scripts/deploy-dev-vm.sh` was either skipped by the orchestrator
+or failed partway through (most commonly: a transient auth/proxy error or
+the user pressed Ctrl+C mid-run). Because the step creates the service
+account first, a missing SA is a reliable indicator the script did not
+complete.
+
+**Fix.** Run `deploy-dev-vm.sh` standalone. It is idempotent — any resources
+that already exist (IAM bindings, firewall rule) are detected and skipped.
+
+```bash
+PROJECT_ID=<your-project> \
+REGION=<vertex-region> \
+FALLBACK_REGION=<cloud-run-region> \
+PRINCIPALS=user:<[email protected]> \
+bash scripts/deploy-dev-vm.sh
+```
+
+`PROJECT_ID`, `REGION`, and `FALLBACK_REGION` must match the values in your
+`config.yaml`. `PRINCIPALS` is a comma-separated list of IAM members who
+should be granted `roles/iap.tunnelResourceAccessor` and
+`roles/compute.osLogin` so they can SSH in via IAP.
+
+**Verify.** The script prints an SSH command at the end; run it:
+```bash
+gcloud compute ssh --tunnel-through-iap \
+  --project=<your-project> --zone=<region>-a claude-code-dev-shared
+```
+The first boot's startup log (installs Node.js, Claude Code, settings)
+is at `/var/log/claude-code-bootstrap.log` on the VM.
+
+---
+
 ## `gcloud` auth issues during setup
 
 ### "Application Default Credentials not found"

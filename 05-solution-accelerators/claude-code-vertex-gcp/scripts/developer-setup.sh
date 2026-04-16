@@ -6,9 +6,13 @@
 #   1. Checks gcloud is installed and the user is authenticated.
 #   2. Runs `gcloud auth application-default login` (ADC is what
 #      Claude Code uses for Vertex auth).
-#   3. Writes ~/.claude/settings.json with the right env + MCP config.
+#   3. Installs the Claude Code CLI globally via `npm install -g
+#      @anthropic-ai/claude-code` if the `claude` command is missing.
+#      Requires Node.js/npm already installed (see the Dev Portal for
+#      OS-specific prereqs).
+#   4. Writes ~/.claude/settings.json with the right env + MCP config.
 #      Asks before overwriting an existing file.
-#   4. Tests the connection by hitting /healthz on the LLM gateway.
+#   5. Tests the connection by hitting /healthz on the LLM gateway.
 #
 # Modes:
 #   * Interactive (default): prompts for project, gateway URL, region.
@@ -86,6 +90,20 @@ if ! gcloud auth application-default print-access-token >/dev/null 2>&1; then
   run_cmd gcloud auth application-default login
 else
   log_info "ADC already present; skipping login"
+fi
+
+# --- Claude Code CLI --------------------------------------------------------
+log_step "Claude Code CLI"
+if ! command -v claude >/dev/null 2>&1; then
+  if ! command -v npm >/dev/null 2>&1; then
+    log_warn "npm not found — install Node.js first (see the Dev Portal for"
+    log_warn "OS-specific steps), then re-run this script."
+    exit 1
+  fi
+  log_info "installing @anthropic-ai/claude-code via npm"
+  run_cmd npm install -g @anthropic-ai/claude-code
+else
+  log_info "claude CLI already installed; skipping"
 fi
 
 # --- Write ~/.claude/settings.json ------------------------------------------
