@@ -27,8 +27,7 @@
 # The raw GitHub URL used when we self-bootstrap via curl-to-bash. When
 # you fork this repo for your own use, edit REPO_URL here (or export it
 # before running) so the bootstrap clones from your fork.
-REPO_URL="${REPO_URL:-https://github.com/PTA-Co-innovation-Team/Anthropic-Google-Co-Innovation.git}"
-REPO_SUBDIR="05-solution-accelerators/claude-code-vertex-gcp"
+REPO_URL="${REPO_URL:-https://github.com/PTA-Co-innovation-Team/ANT-claude-code-vertex-gcp.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 
 # ----- Self-bootstrap when invoked via curl-to-bash -------------------------
@@ -47,8 +46,8 @@ if [[ -z "${_self_dir}" || ! -f "${_self_dir}/lib/common.sh" ]]; then
     exit 1
   fi
   git clone --depth 1 --branch "${REPO_BRANCH}" "${REPO_URL}" "${tmp_dir}/repo"
-  echo "[info] Re-executing from ${tmp_dir}/repo/${REPO_SUBDIR}/scripts/deploy.sh" >&2
-  exec bash "${tmp_dir}/repo/${REPO_SUBDIR}/scripts/deploy.sh" "$@"
+  echo "[info] Re-executing from ${tmp_dir}/repo/scripts/deploy.sh" >&2
+  exec bash "${tmp_dir}/repo/scripts/deploy.sh" "$@"
 fi
 
 # ----- Normal path: we're inside the repo -----------------------------------
@@ -213,6 +212,11 @@ fi
 if [[ "${ENABLE_PORTAL}" == "true" ]]; then
   log_step "deploy-dev-portal.sh"
   bash "${REPO_ROOT}/scripts/deploy-dev-portal.sh"
+fi
+
+if [[ "${ENABLE_OBS}" == "true" ]]; then
+  log_step "deploy-observability.sh"
+  bash "${REPO_ROOT}/scripts/deploy-observability.sh"
 fi
 
 if [[ "${ENABLE_VM}" == "true" ]]; then

@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Claude Code Admin Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Claude Code Admin Dashboard</h1>
+      <p class="subtitle">Gateway usage, model distribution, caller activity, and latency</p>
+      <p class="refresh-info">Auto-refreshes every 60s &mdash; Last updated: <span id="last-updated">loading...</span></p>
+    </header>
+
+    <div class="dashboard-grid">
+      <!-- Requests per Day -->
+      <div class="card">
+        <h2>Requests per Day</h2>
+        <div id="rpd-empty" class="empty-state" style="display:none">No log data yet. Send a request through the gateway to generate data.</div>
+        <canvas id="chart-rpd"></canvas>
+      </div>
+
+      <!-- Requests by Model -->
+      <div class="card">
+        <h2>Requests by Model</h2>
+        <div id="rbm-empty" class="empty-state" style="display:none">No log data yet.</div>
+        <canvas id="chart-rbm"></canvas>
+      </div>
+
+      <!-- Latency Percentiles -->
+      <div class="card">
+        <h2>Latency (last 7 days)</h2>
+        <div id="lp-empty" class="empty-state" style="display:none">No latency data yet.</div>
+        <div class="scorecard-row" id="latency-cards">
+          <div class="scorecard">
+            <div class="value" id="p50">--</div>
+            <div class="label">p50 (ms)</div>
+          </div>
+          <div class="scorecard">
+            <div class="value" id="p95">--</div>
+            <div class="label">p95 (ms)</div>
+          </div>
+          <div class="scorecard">
+            <div class="value" id="p99">--</div>
+            <div class="label">p99 (ms)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Error Rate -->
+      <div class="card">
+        <h2>Error Rate (%)</h2>
+        <div id="er-empty" class="empty-state" style="display:none">No error data yet.</div>
+        <canvas id="chart-er"></canvas>
+      </div>
+
+      <!-- Top Callers -->
+      <div class="card">
+        <h2>Top Callers (last 30 days)</h2>
+        <div id="tc-empty" class="empty-state" style="display:none">No caller data yet.</div>
+        <table id="table-tc" style="display:none">
+          <thead><tr><th>Caller</th><th>Requests</th></tr></thead>
+          <tbody id="tc-body"></tbody>
+        </table>
+      </div>
+
+      <!-- Recent Requests -->
+      <div class="card full-width">
+        <h2>Recent Requests</h2>
+        <div id="rr-empty" class="empty-state" style="display:none">No requests yet.</div>
+        <div style="overflow-x:auto">
+          <table id="table-rr" style="display:none">
+            <thead><tr><th>Time</th><th>Caller</th><th>Model</th><th>Status</th><th>Latency</th></tr></thead>
+            <tbody id="rr-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const COLORS = ['#1a73e8','#34a853','#fbbc04','#ea4335','#9334e6','#ff6d01','#46bdc6','#185abc'];
+let chartRPD = null, chartRBM = null, chartER = null;
+
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    return await r.json();
+  } catch (e) {
+    console.error('fetch failed:', url, e);
+    return null;
+  }
+}
+
+function showEmpty(id, show) {
+  document.getElementById(id).style.display = show ? 'block' : 'none';
+}
+
+async function renderRequestsPerDay() {
+  const res = await fetchJSON('/api/requests-per-day');
+  if (!res || !res.data || res.data.length === 0) {
+    showEmpty('rpd-empty', true);
+    document.getElementById('chart-rpd').style.display = 'none';
+    return;
+  }
+  showEmpty('rpd-empty', false);
+  document.getElementById('chart-rpd').style.display = '';
+  const labels = res.data.map(r => r.date);
+  const data = res.data.map(r => r.count);
+  if (chartRPD) chartRPD.destroy();
+  chartRPD = new Chart(document.getElementById('chart-rpd'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Requests', data, backgroundColor: '#1a73e8' }] },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+  });
+}
+
+async function renderRequestsByModel() {
+  const res = await fetchJSON('/api/requests-by-model');
+  if (!res || !res.data || res.data.length === 0) {
+    showEmpty('rbm-empty', true);
+    document.getElementById('chart-rbm').style.display = 'none';
+    return;
+  }
+  showEmpty('rbm-empty', false);
+  document.getElementById('chart-rbm').style.display = '';
+  if (chartRBM) chartRBM.destroy();
+  chartRBM = new Chart(document.getElementById('chart-rbm'), {
+    type: 'doughnut',
+    data: {
+      labels: res.data.map(r => r.model),
+      datasets: [{ data: res.data.map(r => r.count), backgroundColor: COLORS }]
+    },
+    options: { responsive: true }
+  });
+}
+
+async function renderLatency() {
+  const res = await fetchJSON('/api/latency-percentiles');
+  if (!res || res.p50 === null) {
+    showEmpty('lp-empty', true);
+    document.getElementById('latency-cards').style.display = 'none';
+    return;
+  }
+  showEmpty('lp-empty', false);
+  document.getElementById('latency-cards').style.display = '';
+  document.getElementById('p50').textContent = res.p50 != null ? res.p50.toLocaleString() : '--';
+  document.getElementById('p95').textContent = res.p95 != null ? res.p95.toLocaleString() : '--';
+  document.getElementById('p99').textContent = res.p99 != null ? res.p99.toLocaleString() : '--';
+}
+
+async function renderErrorRate() {
+  const res = await fetchJSON('/api/error-rate');
+  if (!res || !res.data || res.data.length === 0) {
+    showEmpty('er-empty', true);
+    document.getElementById('chart-er').style.display = 'none';
+    return;
+  }
+  showEmpty('er-empty', false);
+  document.getElementById('chart-er').style.display = '';
+  if (chartER) chartER.destroy();
+  chartER = new Chart(document.getElementById('chart-er'), {
+    type: 'line',
+    data: {
+      labels: res.data.map(r => r.date),
+      datasets: [{ label: 'Error %', data: res.data.map(r => r.rate), borderColor: '#ea4335', fill: false, tension: 0.3 }]
+    },
+    options: { responsive: true, scales: { y: { beginAtZero: true, max: 100 } } }
+  });
+}
+
+async function renderTopCallers() {
+  const res = await fetchJSON('/api/top-callers');
+  if (!res || !res.data || res.data.length === 0) {
+    showEmpty('tc-empty', true);
+    document.getElementById('table-tc').style.display = 'none';
+    return;
+  }
+  showEmpty('tc-empty', false);
+  document.getElementById('table-tc').style.display = '';
+  document.getElementById('tc-body').innerHTML = res.data.map(r =>
+    `<tr><td>${r.caller || 'unknown'}</td><td>${r.count}</td></tr>`
+  ).join('');
+}
+
+async function renderRecentRequests() {
+  const res = await fetchJSON('/api/recent-requests');
+  if (!res || !res.data || res.data.length === 0) {
+    showEmpty('rr-empty', true);
+    document.getElementById('table-rr').style.display = 'none';
+    return;
+  }
+  showEmpty('rr-empty', false);
+  document.getElementById('table-rr').style.display = '';
+  document.getElementById('rr-body').innerHTML = res.data.map(r => {
+    const cls = (r.status_code && r.status_code >= 400) ? 'status-err' : 'status-ok';
+    return `<tr>
+      <td>${r.timestamp || ''}</td>
+      <td>${r.caller || 'unknown'}</td>
+      <td>${r.model || ''}</td>
+      <td class="${cls}">${r.status_code || ''}</td>
+      <td>${r.latency_ms != null ? r.latency_ms + ' ms' : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function renderAll() {
+  await Promise.all([
+    renderRequestsPerDay(),
+    renderRequestsByModel(),
+    renderLatency(),
+    renderErrorRate(),
+    renderTopCallers(),
+    renderRecentRequests(),
+  ]);
+  document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  renderAll();
+  setInterval(renderAll, 60000);
+});
+</script>
+</body>
+</html>

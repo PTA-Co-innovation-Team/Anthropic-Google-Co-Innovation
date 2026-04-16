@@ -36,7 +36,7 @@ When this is done deploying, your GCP project will contain:
 | **MCP Gateway** | Cloud Run service — FastMCP over Streamable HTTP | Place to host your organization's custom MCP tools |
 | **Dev Portal** | Cloud Run static site, IAP-protected | Self-service setup instructions for your developers |
 | **Dev VM** *(optional, off by default)* | GCE VM with VS Code Server, accessed via IAP | Cloud dev environment for teams that don't want local installs |
-| **Observability** | Log sink → BigQuery + a Looker Studio template | Admin dashboard: who is using Claude, how much, errors, top models |
+| **Observability** | Log sink → BigQuery + built-in admin dashboard | Admin dashboard: who is using Claude, how much, errors, top models |
 
 All Cloud Run services use **internal-only ingress**. The Dev VM has **no public
 IP** and is reached via IAP TCP tunneling. There is no public surface area.
@@ -264,10 +264,24 @@ To run a Cloud Monitoring uptime check against `/health`:
 Repeat for the MCP gateway if you want a second probe. The SA can
 be reused — just add another `run.invoker` binding on `mcp-gateway`.
 
+### Admin Dashboard
+
+When observability is enabled, the deploy script creates a **BigQuery
+dataset** (`claude_code_logs`), a **Cloud Logging sink** that routes
+gateway logs into it, and an **Admin Dashboard** Cloud Run service.
+
+The dashboard shows real-time charts for request volume, model usage,
+top callers, error rate, and latency percentiles — all powered by
+BigQuery. It auto-refreshes every 60 seconds.
+
+Data appears ~60 seconds after the first request through the LLM
+gateway. Access is gated by Cloud Run IAM (same principals as the
+gateways).
+
 ### Demo prep
 
-After a fresh deploy the Looker Studio dashboard is empty. To populate
-it with realistic-looking traffic before a screenshot or live demo:
+After a fresh deploy the dashboard is empty. To populate it with
+realistic-looking traffic before a screenshot or live demo:
 
 ```bash
 ./scripts/seed-demo-data.sh --users 5 --requests-per-user 10
