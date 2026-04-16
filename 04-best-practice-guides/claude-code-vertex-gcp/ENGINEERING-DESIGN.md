@@ -495,7 +495,9 @@ token, naming every component touched.
 
 **0. Developer types a prompt in Claude Code.**
 Claude Code reads `~/.claude/settings.json`, which was written by
-`scripts/developer-setup.sh`. The file sets
+`scripts/developer-setup.sh` (the same script also installs the
+`@anthropic-ai/claude-code` npm package globally if the CLI is
+missing). The file sets
 `CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_BASE_URL=<gateway>`,
 `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`,
 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, and the three pinned

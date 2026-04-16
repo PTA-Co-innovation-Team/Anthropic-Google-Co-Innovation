@@ -184,9 +184,11 @@ This will:
 
 1. Check `gcloud` is installed and authenticated.
 2. Run `gcloud auth application-default login` (opens a browser).
-3. Write `~/.claude/settings.json` with the right environment variables
+3. Install the Claude Code CLI via `npm install -g @anthropic-ai/claude-code`
+   if `claude` is not already on `PATH` (requires Node.js/npm already installed).
+4. Write `~/.claude/settings.json` with the right environment variables
    (Claude Code reads from here). It asks before overwriting an existing file.
-4. Send a test request through the gateway to prove the round-trip works.
+5. Send a test request through the gateway to prove the round-trip works.
 
 The settings file will look roughly like this:
 

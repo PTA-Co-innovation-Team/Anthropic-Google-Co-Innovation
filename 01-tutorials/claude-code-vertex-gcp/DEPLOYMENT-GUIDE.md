@@ -412,9 +412,13 @@ The script:
 2. Runs `gcloud auth application-default login` (opens a browser).
 3. Prompts for project, gateway URL, MCP URL, region (or reads them
    from the environment).
-4. Writes `~/.claude/settings.json`, backing up any existing file
+4. Installs the Claude Code CLI globally via
+   `npm install -g @anthropic-ai/claude-code` if the `claude`
+   command is not already on `PATH`. Requires Node.js/npm
+   (see the Dev Portal for OS-specific prereqs).
+5. Writes `~/.claude/settings.json`, backing up any existing file
    with a timestamped `.bak` suffix.
-5. Hits the gateway `/health` with the developer's ADC token to
+6. Hits the gateway `/health` with the developer's ADC token to
    confirm the round-trip works.
 
 The developer then runs `claude` and is on Vertex.
