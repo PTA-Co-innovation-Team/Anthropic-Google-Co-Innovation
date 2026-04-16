@@ -122,9 +122,24 @@ mcp_asgi = _build_mcp_asgi()
 # fail with "task group not initialized" errors.
 # ----------------------------------------------------------------------------
 
-# `lifespan` on the sub-app is what FastMCP exposes. Passing it through
-# to FastAPI keeps both apps happy.
-_sub_lifespan = getattr(mcp_asgi, "lifespan", None)
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Propagate the FastMCP sub-app lifespan into the parent FastAPI app.
+
+    Starlette does not automatically forward lifespan events to mounted
+    sub-applications, so we must do it manually. We look for the
+    lifespan handler on the sub-app's router and invoke it ourselves.
+    """
+    _lc = getattr(getattr(mcp_asgi, "router", None), "lifespan_context", None)
+    if _lc is not None:
+        async with _lc(mcp_asgi):
+            yield
+    else:
+        yield
+
 
 app = FastAPI(
     title="Claude Code MCP Gateway",
@@ -132,7 +147,7 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
-    lifespan=_sub_lifespan,
+    lifespan=_lifespan,
 )
 
 
