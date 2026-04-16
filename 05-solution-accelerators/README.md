@@ -4,4 +4,6 @@ Pre-packaged, enterprise-ready architectures and automation pipelines to jumpsta
 
 ## Contents
 
-_Content coming soon._
+| Accelerator | Description |
+|---|---|
+| [`claude-code-vertex-gcp`](./claude-code-vertex-gcp) | **Claude Code on GCP via Vertex AI** — production-ready reference architecture with LLM gateway, MCP gateway, dev portal, observability, and IaC (Terraform). Deploy via interactive script, curl-to-bash, Terraform, or Jupyter notebook. |

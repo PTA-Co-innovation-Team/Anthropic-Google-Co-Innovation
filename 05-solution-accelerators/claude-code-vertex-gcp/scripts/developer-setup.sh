@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# =============================================================================
+# developer-setup.sh — run on a developer's laptop.
+#
+# What it does:
+#   1. Checks gcloud is installed and the user is authenticated.
+#   2. Runs `gcloud auth application-default login` (ADC is what
+#      Claude Code uses for Vertex auth).
+#   3. Writes ~/.claude/settings.json with the right env + MCP config.
+#      Asks before overwriting an existing file.
+#   4. Tests the connection by hitting /healthz on the LLM gateway.
+#
+# Modes:
+#   * Interactive (default): prompts for project, gateway URL, region.
+#   * Env-driven: set PROJECT_ID / LLM_GATEWAY_URL / MCP_GATEWAY_URL /
+#     REGION and run with --yes.
+#   * --diagnose: print diagnostics only, don't modify anything.
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "${SCRIPT_DIR}/lib/common.sh"
+
+print_help() {
+  cat <<'HELP'
+Usage: developer-setup.sh [--help] [--yes] [--diagnose]
+
+Configure Claude Code on this machine to use the team's Vertex-AI-routed
+gateway. Writes ~/.claude/settings.json.
+
+Environment (optional):
+  PROJECT_ID         GCP project ID
+  REGION             Vertex region (default "global")
+  LLM_GATEWAY_URL    Cloud Run URL of the LLM gateway
+  MCP_GATEWAY_URL    Cloud Run URL of the MCP gateway (optional)
+  OPUS_MODEL         e.g. claude-opus-4-6
+  SONNET_MODEL       e.g. claude-sonnet-4-6
+  HAIKU_MODEL        e.g. claude-haiku-4-5@20251001
+HELP
+}
+
+DIAGNOSE_ONLY=0
+for arg in "$@"; do
+  [[ "$arg" == "--diagnose" ]] && DIAGNOSE_ONLY=1
+done
+parse_common_flags "$@"
+
+require_cmd gcloud
+
+# --- Diagnose mode: print environment, don't change anything ----------------
+if [[ "${DIAGNOSE_ONLY}" == "1" ]]; then
+  log_step "diagnostics"
+  gcloud config list 2>/dev/null || true
+  gcloud auth list 2>/dev/null || true
+  [[ -f "${HOME}/.claude/settings.json" ]] && \
+    { log_info "~/.claude/settings.json:"; cat "${HOME}/.claude/settings.json"; } || \
+    log_warn "no ~/.claude/settings.json yet"
+  exit 0
+fi
+
+# --- Prompt for any missing values ------------------------------------------
+: "${REGION:=global}"
+if [[ -z "${PROJECT_ID:-}" ]]; then
+  default_project="$(gcloud config get-value project 2>/dev/null || true)"
+  read -rp "GCP project ID [${default_project}]: " PROJECT_ID </dev/tty
+  PROJECT_ID="${PROJECT_ID:-${default_project}}"
+fi
+: "${PROJECT_ID:?project id required}"
+
+if [[ -z "${LLM_GATEWAY_URL:-}" ]]; then
+  read -rp "LLM gateway URL (e.g. https://llm-gateway-xxx-uc.a.run.app): " LLM_GATEWAY_URL </dev/tty
+fi
+: "${LLM_GATEWAY_URL:?gateway URL required}"
+
+if [[ -z "${MCP_GATEWAY_URL:-}" ]]; then
+  read -rp "MCP gateway URL (blank to skip): " MCP_GATEWAY_URL </dev/tty
+fi
+
+: "${OPUS_MODEL:=claude-opus-4-6}"
+: "${SONNET_MODEL:=claude-sonnet-4-6}"
+: "${HAIKU_MODEL:=claude-haiku-4-5@20251001}"
+
+# --- ADC login --------------------------------------------------------------
+log_step "application default credentials"
+if ! gcloud auth application-default print-access-token >/dev/null 2>&1; then
+  run_cmd gcloud auth application-default login
+else
+  log_info "ADC already present; skipping login"
+fi
+
+# --- Write ~/.claude/settings.json ------------------------------------------
+SETTINGS_DIR="${HOME}/.claude"
+SETTINGS_FILE="${SETTINGS_DIR}/settings.json"
+mkdir -p "${SETTINGS_DIR}"
+
+if [[ -f "${SETTINGS_FILE}" ]]; then
+  log_warn "existing settings file at ${SETTINGS_FILE}"
+  if ! confirm "Overwrite?"; then
+    log_info "keeping existing settings; aborting without changes"
+    exit 0
+  fi
+  run_cmd cp "${SETTINGS_FILE}" "${SETTINGS_FILE}.bak.$(date +%s)"
+fi
+
+# Build the JSON. Use python3 rather than hand-formatting to guarantee
+# valid output and correct escaping.
+require_cmd python3
+run_cmd python3 - "${SETTINGS_FILE}" <<PY
+import json, sys
+path = sys.argv[1]
+settings = {
+    "env": {
+        "CLAUDE_CODE_USE_VERTEX": "1",
+        "CLOUD_ML_REGION": "${REGION}",
+        "ANTHROPIC_VERTEX_PROJECT_ID": "${PROJECT_ID}",
+        "ANTHROPIC_VERTEX_BASE_URL": "${LLM_GATEWAY_URL}",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "${OPUS_MODEL}",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "${SONNET_MODEL}",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${HAIKU_MODEL}",
+    },
+}
+mcp = "${MCP_GATEWAY_URL}".strip()
+if mcp:
+    settings["mcpServers"] = {
+        "gcp-tools": {"type": "http", "url": f"{mcp.rstrip('/')}/mcp"},
+    }
+with open(path, "w") as f:
+    json.dump(settings, f, indent=2)
+print(f"wrote {path}")
+PY
+
+# --- Connection smoke test --------------------------------------------------
+log_step "connection smoke test"
+TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null || true)"
+if [[ -n "${TOKEN}" ]]; then
+  # /healthz requires no auth on the gateway itself, but Cloud Run's
+  # IAM layer does — so we send the token. Non-2xx => problem.
+  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "${LLM_GATEWAY_URL%/}/healthz" || echo "000")"
+  case "${status}" in
+    200) log_info "gateway /healthz returned 200 — you're all set." ;;
+    401|403) log_warn "gateway returned ${status} — you likely need roles/run.invoker. Ask your admin." ;;
+    000) log_warn "could not reach gateway (network / VPN issue?)" ;;
+    *) log_warn "unexpected status from gateway: ${status}" ;;
+  esac
+else
+  log_warn "no ADC token; couldn't smoke-test the gateway"
+fi
+
+log_info "done. Start Claude Code with: claude"
