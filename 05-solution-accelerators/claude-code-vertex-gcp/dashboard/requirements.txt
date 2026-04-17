@@ -1,5 +1,0 @@
-# Admin dashboard dependencies.
-fastapi>=0.115,<0.120
-uvicorn[standard]>=0.32,<0.40
-google-cloud-bigquery>=3.25,<4.0
-google-auth>=2.34,<3.0
