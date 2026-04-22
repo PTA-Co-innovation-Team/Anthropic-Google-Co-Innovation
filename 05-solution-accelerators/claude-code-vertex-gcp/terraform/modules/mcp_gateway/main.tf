@@ -37,7 +37,8 @@ resource "google_cloud_run_v2_service" "gateway" {
   location = var.region
   labels   = var.labels
 
-  ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  ingress              = var.enable_glb ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
+  invoker_iam_disabled = true
 
   template {
     service_account = google_service_account.sa.email
@@ -73,6 +74,28 @@ resource "google_cloud_run_v2_service" "gateway" {
         name  = "GOOGLE_CLOUD_PROJECT"
         value = var.project_id
       }
+      env {
+        name  = "VERTEX_DEFAULT_REGION"
+        value = var.vertex_region
+      }
+
+      env {
+        name  = "ENABLE_TOKEN_VALIDATION"
+        value = "1"
+      }
+      env {
+        name  = "ALLOWED_PRINCIPALS"
+        value = join(",", var.allowed_principals)
+      }
+
+      startup_probe {
+        http_get {
+          path = "/health"
+        }
+        initial_delay_seconds = 2
+        period_seconds        = 5
+        failure_threshold     = 3
+      }
     }
   }
 
@@ -84,11 +107,5 @@ resource "google_cloud_run_v2_service" "gateway" {
   }
 }
 
-resource "google_cloud_run_v2_service_iam_member" "invokers" {
-  for_each = toset(var.allowed_principals)
-  project  = var.project_id
-  location = var.region
-  name     = google_cloud_run_v2_service.gateway.name
-  role     = "roles/run.invoker"
-  member   = each.value
-}
+# Invoker IAM is disabled (invoker_iam_disabled = true). Auth is handled
+# by the app-level token_validation.py middleware instead.

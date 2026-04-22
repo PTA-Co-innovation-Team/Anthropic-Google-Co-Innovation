@@ -91,10 +91,14 @@ pick_region() {
 # -----------------------------------------------------------------------------
 fallback_region_for() {
   local region="$1"
+  # Only multi-region Vertex values need a fallback. Real GCE-compatible
+  # regions (e.g. us-east5, europe-west3) are used directly — matching
+  # Terraform's local.gce_region logic in variables.tf.
   case "$region" in
-    global|us|us-*)  echo "us-central1" ;;
-    europe|europe-*) echo "europe-west1" ;;
-    asia|asia-*)     echo "asia-southeast1" ;;
-    *)               echo "us-central1" ;;
+    global)  echo "us-central1" ;;
+    us)      echo "us-central1" ;;
+    europe)  echo "europe-west1" ;;
+    asia)    echo "asia-southeast1" ;;
+    *)       echo "${region}" ;;
   esac
 }

@@ -42,3 +42,9 @@ variable "labels" {
   type        = map(string)
   default     = {}
 }
+
+variable "enable_glb" {
+  description = "When true, restrict ingress to GLB and enable app-level token validation."
+  type        = bool
+  default     = false
+}

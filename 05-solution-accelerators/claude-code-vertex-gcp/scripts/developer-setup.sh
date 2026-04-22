@@ -12,7 +12,7 @@
 #      OS-specific prereqs).
 #   4. Writes ~/.claude/settings.json with the right env + MCP config.
 #      Asks before overwriting an existing file.
-#   5. Tests the connection by hitting /healthz on the LLM gateway.
+#   5. Tests the connection by hitting /health on the LLM gateway.
 #
 # Modes:
 #   * Interactive (default): prompts for project, gateway URL, region.
@@ -35,8 +35,8 @@ gateway. Writes ~/.claude/settings.json.
 Environment (optional):
   PROJECT_ID         GCP project ID
   REGION             Vertex region (default "global")
-  LLM_GATEWAY_URL    Cloud Run URL of the LLM gateway
-  MCP_GATEWAY_URL    Cloud Run URL of the MCP gateway (optional)
+  LLM_GATEWAY_URL    Gateway URL (GLB or Cloud Run; auto-discovered if omitted)
+  MCP_GATEWAY_URL    MCP gateway URL (auto-discovered if omitted)
   OPUS_MODEL         e.g. claude-opus-4-6
   SONNET_MODEL       e.g. claude-sonnet-4-6
   HAIKU_MODEL        e.g. claude-haiku-4-5@20251001
@@ -72,12 +72,32 @@ fi
 : "${PROJECT_ID:?project id required}"
 
 if [[ -z "${LLM_GATEWAY_URL:-}" ]]; then
-  read -rp "LLM gateway URL (e.g. https://llm-gateway-xxx-uc.a.run.app): " LLM_GATEWAY_URL </dev/tty
+  _discovered="$(resolve_glb_url "${PROJECT_ID}" 2>/dev/null || echo "")"
+  if [[ -z "${_discovered}" ]]; then
+    for _try_region in "${REGION:-us-central1}" us-central1 us-east5 europe-west1; do
+      _discovered="$(gcloud run services describe llm-gateway \
+                       --project "${PROJECT_ID}" --region "${_try_region}" \
+                       --format="value(status.url)" 2>/dev/null || echo "")"
+      [[ -n "${_discovered}" ]] && break
+    done
+  fi
+  read -rp "LLM gateway URL [${_discovered}]: " LLM_GATEWAY_URL </dev/tty
+  LLM_GATEWAY_URL="${LLM_GATEWAY_URL:-${_discovered}}"
 fi
 : "${LLM_GATEWAY_URL:?gateway URL required}"
 
 if [[ -z "${MCP_GATEWAY_URL:-}" ]]; then
-  read -rp "MCP gateway URL (blank to skip): " MCP_GATEWAY_URL </dev/tty
+  _mcp_default="$(resolve_glb_url "${PROJECT_ID}" 2>/dev/null || echo "")"
+  if [[ -z "${_mcp_default}" ]]; then
+    for _try_region in "${REGION:-us-central1}" us-central1 us-east5 europe-west1; do
+      _mcp_default="$(gcloud run services describe mcp-gateway \
+                        --project "${PROJECT_ID}" --region "${_try_region}" \
+                        --format="value(status.url)" 2>/dev/null || echo "")"
+      [[ -n "${_mcp_default}" ]] && break
+    done
+  fi
+  read -rp "MCP gateway URL (blank to skip) [${_mcp_default}]: " MCP_GATEWAY_URL </dev/tty
+  MCP_GATEWAY_URL="${MCP_GATEWAY_URL:-${_mcp_default}}"
 fi
 
 : "${OPUS_MODEL:=claude-opus-4-6}"
@@ -120,51 +140,94 @@ if [[ -f "${SETTINGS_FILE}" ]]; then
   run_cmd cp "${SETTINGS_FILE}" "${SETTINGS_FILE}.bak.$(date +%s)"
 fi
 
-# Build the JSON. Use python3 rather than hand-formatting to guarantee
-# valid output and correct escaping.
+# Build the JSON via python3 to guarantee valid output and correct
+# escaping.  Values are passed through env vars (not heredoc
+# interpolation) to avoid shell-injection footguns.
 require_cmd python3
-run_cmd python3 - "${SETTINGS_FILE}" <<PY
-import json, sys
+run_cmd env \
+  _REGION="${REGION}" \
+  _PROJECT_ID="${PROJECT_ID}" \
+  _LLM_GATEWAY_URL="${LLM_GATEWAY_URL}" \
+  _MCP_GATEWAY_URL="${MCP_GATEWAY_URL}" \
+  _OPUS_MODEL="${OPUS_MODEL}" \
+  _SONNET_MODEL="${SONNET_MODEL}" \
+  _HAIKU_MODEL="${HAIKU_MODEL}" \
+  python3 - "${SETTINGS_FILE}" <<'PY'
+import json, os, sys
+
 path = sys.argv[1]
-settings = {
-    "env": {
-        "CLAUDE_CODE_USE_VERTEX": "1",
-        "CLOUD_ML_REGION": "${REGION}",
-        "ANTHROPIC_VERTEX_PROJECT_ID": "${PROJECT_ID}",
-        "ANTHROPIC_VERTEX_BASE_URL": "${LLM_GATEWAY_URL}",
-        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": "${OPUS_MODEL}",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": "${SONNET_MODEL}",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${HAIKU_MODEL}",
-    },
-}
-mcp = "${MCP_GATEWAY_URL}".strip()
+
+# Load existing settings so we preserve keys we don't manage.
+try:
+    with open(path) as f:
+        settings = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    settings = {}
+
+# Merge our env vars into the existing env block.
+env = settings.setdefault("env", {})
+env.update({
+    "CLAUDE_CODE_USE_VERTEX": "1",
+    "CLOUD_ML_REGION": os.environ["_REGION"],
+    "ANTHROPIC_VERTEX_PROJECT_ID": os.environ["_PROJECT_ID"],
+    "ANTHROPIC_VERTEX_BASE_URL": os.environ["_LLM_GATEWAY_URL"],
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ["_OPUS_MODEL"],
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ["_SONNET_MODEL"],
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ["_HAIKU_MODEL"],
+})
+
+import re
+gateway_url = os.environ["_LLM_GATEWAY_URL"]
+if re.match(r"^https://\d+\.\d+\.\d+\.\d+", gateway_url):
+    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+else:
+    env.pop("NODE_TLS_REJECT_UNAUTHORIZED", None)
+
+mcp = os.environ.get("_MCP_GATEWAY_URL", "").strip()
 if mcp:
-    settings["mcpServers"] = {
-        "gcp-tools": {"type": "http", "url": f"{mcp.rstrip('/')}/mcp"},
+    settings.setdefault("mcpServers", {})["gcp-tools"] = {
+        "type": "http",
+        "url": f"{mcp.rstrip('/')}/mcp",
     }
+
 with open(path, "w") as f:
     json.dump(settings, f, indent=2)
 print(f"wrote {path}")
 PY
 
+if [[ "${LLM_GATEWAY_URL}" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  log_info "self-signed cert: added NODE_TLS_REJECT_UNAUTHORIZED=0 to settings.json"
+  log_info "to switch to a trusted cert, re-run deploy.sh and choose managed certificate"
+else
+  log_info "domain-based URL detected — using Google-managed certificate (no TLS workaround needed)"
+fi
+
 # --- Connection smoke test --------------------------------------------------
 log_step "connection smoke test"
-TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null || true)"
+# Use an ADC access token — this is the same token type Claude Code sends.
+# Cloud Run's IAM check is disabled (--no-invoker-iam-check); the gateway's
+# app-level token_validation middleware validates the token instead.
+TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null \
+         || gcloud auth print-identity-token --audiences="${LLM_GATEWAY_URL%/}" 2>/dev/null \
+         || true)"
+# Use -k for IP-based URLs (GLB with self-signed cert).
+_CURL_K=""
+if [[ "${LLM_GATEWAY_URL}" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  _CURL_K="-k"
+fi
 if [[ -n "${TOKEN}" ]]; then
-  # /healthz requires no auth on the gateway itself, but Cloud Run's
-  # IAM layer does — so we send the token. Non-2xx => problem.
-  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+  status="$(curl -sS ${_CURL_K} -o /dev/null -w '%{http_code}' --connect-timeout 10 \
               -H "Authorization: Bearer ${TOKEN}" \
-              "${LLM_GATEWAY_URL%/}/healthz" || echo "000")"
+              "${LLM_GATEWAY_URL%/}/health" || echo "000")"
   case "${status}" in
-    200) log_info "gateway /healthz returned 200 — you're all set." ;;
+    200) log_info "gateway /health returned 200 — you're all set." ;;
     401|403) log_warn "gateway returned ${status} — you likely need roles/run.invoker. Ask your admin." ;;
     000) log_warn "could not reach gateway (network / VPN issue?)" ;;
     *) log_warn "unexpected status from gateway: ${status}" ;;
   esac
 else
-  log_warn "no ADC token; couldn't smoke-test the gateway"
+  log_warn "no credentials available; couldn't smoke-test the gateway"
 fi
 
 log_info "done. Start Claude Code with: claude"

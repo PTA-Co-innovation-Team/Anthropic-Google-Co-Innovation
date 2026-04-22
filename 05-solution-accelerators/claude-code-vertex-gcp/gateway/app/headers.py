@@ -31,11 +31,14 @@ from typing import Iterable
 # - Host: uvicorn sets this to the Cloud Run hostname; Vertex needs the
 #   Vertex hostname, which httpx sets automatically when we build the URL.
 # - Content-Length: httpx recomputes this when we rebuild the request body.
+# - Accept-Encoding: stripped so Vertex returns uncompressed bytes that
+#   we can stream back via aiter_raw() without decompression overhead.
 # - x-cloud-trace-context / x-goog-*: GCP-internal, stripping is safer.
 _EXACT_DROPS = {
     "authorization",
     "host",
     "content-length",
+    "accept-encoding",
     "x-cloud-trace-context",
     "x-forwarded-for",
     "x-forwarded-proto",

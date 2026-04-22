@@ -28,3 +28,8 @@ google-auth>=2.34,<3.0
 # Logging handler without editing requirements. Currently unused at
 # runtime (we emit JSON to stdout), but cheap to ship.
 google-cloud-logging>=3.11,<4.0
+
+# cachetools provides the TTL cache used by the token-validation
+# middleware (GLB mode). Already a transitive dep of google-auth,
+# listed explicitly because we import it directly.
+cachetools>=5.3,<6.0

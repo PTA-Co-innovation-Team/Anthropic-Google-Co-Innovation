@@ -36,12 +36,30 @@ IMAGE_TAG="$(date -u +%Y%m%d-%H%M%S)"
 IMAGE="${CR_REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${IMAGE_TAG}"
 
 # --- Look up gateway URLs for the substitution ------------------------------
-LLM_URL="$(gcloud run services describe llm-gateway \
-             --project "${PROJECT_ID}" --region "${CR_REGION}" \
-             --format="value(status.url)" 2>/dev/null || echo "")"
-MCP_URL="$(gcloud run services describe mcp-gateway \
-             --project "${PROJECT_ID}" --region "${CR_REGION}" \
-             --format="value(status.url)" 2>/dev/null || echo "")"
+# In GLB mode, the portal should show the GLB URL (single entry point) rather
+# than direct Cloud Run URLs (which are unreachable due to ingress restriction).
+LLM_URL=""
+MCP_URL=""
+if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
+  GLB_URL="$(resolve_glb_url "${PROJECT_ID}" || echo "")"
+  if [[ -n "${GLB_URL}" ]]; then
+    LLM_URL="${GLB_URL}"
+    MCP_URL="${GLB_URL}"
+  else
+    log_warn "GLB enabled but no GLB URL found — falling back to direct Cloud Run URLs"
+  fi
+fi
+
+if [[ -z "${LLM_URL}" ]]; then
+  LLM_URL="$(gcloud run services describe llm-gateway \
+               --project "${PROJECT_ID}" --region "${CR_REGION}" \
+               --format="value(status.url)" 2>/dev/null || echo "")"
+fi
+if [[ -z "${MCP_URL}" ]]; then
+  MCP_URL="$(gcloud run services describe mcp-gateway \
+               --project "${PROJECT_ID}" --region "${CR_REGION}" \
+               --format="value(status.url)" 2>/dev/null || echo "")"
+fi
 
 # --- Prepare a build context with substituted placeholders ------------------
 BUILD_DIR="$(mktemp -d -t portal-build-XXXXXX)"
@@ -66,28 +84,27 @@ run_cmd gcloud builds submit "${BUILD_DIR}" \
   --region "${CR_REGION}"
 
 log_step "deploy Cloud Run service ${SERVICE_NAME}"
+
+if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
+  INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
+  AUTH_FLAG="--no-allow-unauthenticated"
+else
+  INGRESS_FLAG="--ingress all"
+  AUTH_FLAG="--no-allow-unauthenticated"
+fi
+
 run_cmd gcloud run deploy "${SERVICE_NAME}" \
   --project "${PROJECT_ID}" \
   --region "${CR_REGION}" \
   --image "${IMAGE}" \
-  --ingress internal-and-cloud-load-balancing \
-  --no-allow-unauthenticated \
+  ${INGRESS_FLAG} \
+  ${AUTH_FLAG} \
   --min-instances 0 --max-instances 2 \
   --cpu 1 --memory 256Mi \
   --port 8080 \
   --quiet
 
-if [[ -n "${PRINCIPALS}" ]]; then
-  log_step "grant roles/run.invoker to principals"
-  IFS=',' read -ra _principals <<<"${PRINCIPALS}"
-  for p in "${_principals[@]}"; do
-    p="${p## }"; p="${p%% }"
-    [[ -z "${p}" ]] && continue
-    run_cmd gcloud run services add-iam-policy-binding "${SERVICE_NAME}" \
-      --project "${PROJECT_ID}" --region "${CR_REGION}" \
-      --member="${p}" --role="roles/run.invoker" --quiet
-  done
-fi
+grant_run_invoker "${SERVICE_NAME}" "${PROJECT_ID}" "${CR_REGION}" "${PRINCIPALS}"
 
 URL="$(gcloud run services describe "${SERVICE_NAME}" \
         --project "${PROJECT_ID}" --region "${CR_REGION}" \

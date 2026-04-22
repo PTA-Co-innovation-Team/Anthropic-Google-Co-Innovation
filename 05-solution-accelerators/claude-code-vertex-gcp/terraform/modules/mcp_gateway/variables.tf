@@ -8,6 +8,11 @@ variable "region" {
   type        = string
 }
 
+variable "vertex_region" {
+  description = "Default Vertex region (e.g. \"global\") — passed to the container as VERTEX_DEFAULT_REGION."
+  type        = string
+}
+
 variable "image" {
   description = "Full container image reference. When empty, a placeholder is used."
   type        = string
@@ -36,4 +41,10 @@ variable "labels" {
   description = "Labels applied to the Cloud Run service."
   type        = map(string)
   default     = {}
+}
+
+variable "enable_glb" {
+  description = "When true, restrict ingress to GLB and enable app-level token validation."
+  type        = bool
+  default     = false
 }

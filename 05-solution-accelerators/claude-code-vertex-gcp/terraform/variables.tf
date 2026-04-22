@@ -121,6 +121,33 @@ variable "use_vpc_connector" {
 }
 
 # -----------------------------------------------------------------------------
+# Global Load Balancer (optional).
+# -----------------------------------------------------------------------------
+variable "enable_glb" {
+  description = "Deploy a Global HTTP(S) LB in front of Cloud Run. Changes ingress to internal-and-cloud-load-balancing. Adds ~$18/month."
+  type        = bool
+  default     = false
+}
+
+variable "glb_domain" {
+  description = "Domain for Google-managed SSL cert on the GLB. Empty = IP-only access with self-signed cert."
+  type        = string
+  default     = ""
+}
+
+variable "iap_support_email" {
+  description = "Support email for the IAP OAuth consent screen. Required when enable_glb=true and dev portal is enabled."
+  type        = string
+  default     = ""
+}
+
+variable "admin_dashboard_service_name" {
+  description = "Cloud Run service name for the admin dashboard (deployed by bash scripts, not Terraform). Set to \"admin-dashboard\" after deploying observability via scripts."
+  type        = string
+  default     = ""
+}
+
+# -----------------------------------------------------------------------------
 # Access control — principals allowed to use this deployment.
 # -----------------------------------------------------------------------------
 variable "allowed_principals" {
@@ -201,4 +228,14 @@ locals {
     deployed-by = "claude-code-vertex-gcp"
     managed-by  = "terraform"
   }
+
+  # When both GLB and dev VM are enabled, the dev VM's service account
+  # must be in the gateway's ALLOWED_PRINCIPALS so its ADC tokens pass
+  # the app-level token validation middleware.
+  _dev_vm_sa_principal = "serviceAccount:claude-code-dev-vm@${var.project_id}.iam.gserviceaccount.com"
+  gateway_allowed_principals = (
+    var.enable_glb && var.enable_dev_vm
+    ? concat(var.allowed_principals, [local._dev_vm_sa_principal])
+    : var.allowed_principals
+  )
 }

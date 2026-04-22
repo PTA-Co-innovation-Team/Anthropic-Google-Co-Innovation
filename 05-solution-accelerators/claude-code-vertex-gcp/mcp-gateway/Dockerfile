@@ -39,6 +39,7 @@ RUN uv sync --no-dev --no-install-project --frozen || uv sync --no-dev --no-inst
 
 # Now copy the application source and install the project itself.
 COPY server.py ./
+COPY token_validation.py ./
 COPY tools ./tools
 
 RUN uv sync --no-dev --frozen || uv sync --no-dev
@@ -60,6 +61,7 @@ WORKDIR /app
 # Copy the pre-built venv and the application.
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --chown=app:app server.py ./
+COPY --chown=app:app token_validation.py ./
 COPY --chown=app:app tools ./tools
 
 USER app

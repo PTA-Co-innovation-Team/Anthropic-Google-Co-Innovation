@@ -58,6 +58,7 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" \
   run_cmd gcloud iam service-accounts create "${SA_ID}" \
     --project "${PROJECT_ID}" \
     --display-name="Claude Code Dev VM"
+  wait_for_sa "${SA_EMAIL}"
 fi
 for role in roles/aiplatform.user roles/logging.logWriter; do
   run_cmd gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
@@ -77,14 +78,34 @@ if ! gcloud compute firewall-rules describe allow-iap-ssh \
     --target-tags=claude-code-dev-vm
 fi
 
+# --- Resolve gateway URLs ---------------------------------------------------
+log_step "resolve gateway URLs"
+if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
+  GLB_URL="$(resolve_glb_url "${PROJECT_ID}" || echo "")"
+  if [[ -n "${GLB_URL}" ]]; then
+    LLM_URL="${GLB_URL}"
+    MCP_URL="${GLB_URL}"
+  else
+    log_warn "GLB enabled but no GLB IP found — falling back to direct Cloud Run URLs"
+  fi
+fi
+
+if [[ -z "${LLM_URL:-}" ]]; then
+  LLM_URL="$(gcloud run services describe llm-gateway \
+               --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+               --format="value(status.url)" 2>/dev/null || echo "")"
+fi
+if [[ -z "${MCP_URL:-}" ]]; then
+  MCP_URL="$(gcloud run services describe mcp-gateway \
+               --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+               --format="value(status.url)" 2>/dev/null || echo "")"
+fi
+
+log_info "LLM gateway URL for dev VM: ${LLM_URL}"
+log_info "MCP gateway URL for dev VM: ${MCP_URL}"
+
 # --- Render startup script --------------------------------------------------
 log_step "render startup script"
-LLM_URL="$(gcloud run services describe llm-gateway \
-             --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
-             --format="value(status.url)" 2>/dev/null || echo "")"
-MCP_URL="$(gcloud run services describe mcp-gateway \
-             --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
-             --format="value(status.url)" 2>/dev/null || echo "")"
 
 STARTUP_FILE="$(mktemp -t startup-XXXXXX.sh)"
 trap 'rm -f "${STARTUP_FILE}"' EXIT

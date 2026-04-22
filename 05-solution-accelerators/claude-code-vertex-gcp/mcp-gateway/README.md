@@ -14,13 +14,15 @@ following [ADD_YOUR_OWN_TOOL.md](ADD_YOUR_OWN_TOOL.md).
 
 | Path | Method | Auth | Purpose |
 | --- | --- | --- | --- |
-| `/health` | GET | Cloud Run IAM (`roles/run.invoker` required) | Liveness probe for the e2e test script and Cloud Monitoring uptime checks. App-layer is open; the platform IAM check runs first. |
-| `/mcp` | POST / GET / DELETE | Cloud Run IAM (`roles/run.invoker`) | MCP Streamable HTTP endpoint (JSON-RPC, session-based) |
+| `/health` | GET | Open (bypasses token validation). | Liveness probe for the e2e test script, Cloud Monitoring uptime checks, and GLB health probes. |
+| `/mcp` | POST / GET / DELETE | App-level token validation (`token_validation.py`) — accepts both OAuth2 access tokens and OIDC identity tokens. | MCP Streamable HTTP endpoint (JSON-RPC, session-based) |
 
-> Need an *anonymous* external uptime probe? That isn't possible with
-> the current ingress/auth posture — see the repo README's
-> "External uptime probes" section for the SA-based Cloud Monitoring
-> pattern.
+> Cloud Run's invoker IAM check is **disabled** (`--no-invoker-iam-check`)
+> because Claude Code sends OAuth2 access tokens, which Cloud Run IAM
+> rejects. Auth is handled by the `token_validation.py` middleware,
+> which enforces an `ALLOWED_PRINCIPALS` allowlist. In **standard mode**,
+> ingress is `all`; in **GLB mode**, ingress is
+> `internal-and-cloud-load-balancing` (only the GLB can reach the service).
 
 The server is a **FastAPI app with FastMCP mounted at `/mcp`**. This
 lets us serve an unauthenticated `/health` alongside the MCP endpoint
@@ -45,9 +47,10 @@ into each developer's Claude Code config:
 }
 ```
 
-Cloud Run's IAM invoker check means the developer's ADC token gets
-attached automatically by Claude Code's MCP client — no additional
-setup.
+In standard mode, Cloud Run's IAM invoker check means the developer's
+ADC token gets attached automatically by Claude Code's MCP client. In
+GLB mode, the URL points to the GLB (e.g. `https://<glb-ip>/mcp`) and
+the app-level middleware validates the token instead.
 
 ---
 
@@ -101,15 +104,31 @@ first run.
 
 The deploy scripts set the Cloud Run service up like this:
 
-| Setting | Value | Why |
-| --- | --- | --- |
-| Ingress | `internal-and-cloud-load-balancing` | No public surface. |
-| Auth | `--no-allow-unauthenticated` | IAM enforces `roles/run.invoker`. |
-| Service account | dedicated SA with **only** the roles its tools need | Least privilege. |
-| CPU | 1 | Tools are I/O-bound. |
-| Memory | 512Mi | FastMCP + a few GCP clients fit easily. |
-| Min instances | 0 | Scales to zero when idle. |
-| Concurrency | 80 | Default; tools are stateless. |
+| Setting | Standard mode | GLB mode | Why |
+| --- | --- | --- | --- |
+| Ingress | `all` | `internal-and-cloud-load-balancing` | GLB restricts direct access. |
+| Auth | `--no-invoker-iam-check` | *(same)* | Cloud Run IAM disabled; app-level token validation handles auth. |
+| Env: `ENABLE_TOKEN_VALIDATION` | `1` | `1` | Activates `token_validation.py` middleware (always on). |
+| Env: `ALLOWED_PRINCIPALS` | comma-separated emails | *(same)* | Restricts which Google identities can call the gateway. |
+| Service account | dedicated SA with **only** the roles its tools need | *(same)* | Least privilege. |
+| CPU | 1 | *(same)* | Tools are I/O-bound. |
+| Memory | 512Mi | *(same)* | FastMCP + a few GCP clients fit easily. |
+| Min instances | 0 | *(same)* | Scales to zero when idle. |
+| Concurrency | 80 | *(same)* | Default; tools are stateless. |
+
+### Token validation middleware
+
+`token_validation.py` is registered conditionally in `server.py` when
+`ENABLE_TOKEN_VALIDATION=1`. It validates both OAuth2 access tokens
+(via Google's `tokeninfo` endpoint with 30s TTL cache) and OIDC
+identity tokens (via `google.oauth2.id_token.verify_oauth2_token`).
+Health endpoints (`/health`, `/healthz`) bypass validation so GLB
+probes work without a token.
+
+> **Sync requirement:** `mcp-gateway/token_validation.py` is a copy of
+> `gateway/app/token_validation.py`. The pre-deploy check script
+> (`scripts/pre-deploy-check.sh`) verifies the two files are in sync.
+> When editing one, update the other.
 
 ---
 
@@ -127,7 +146,8 @@ Rough shape: drop a file under `tools/`, import + decorate in
 
 | Symptom | Check |
 | --- | --- |
-| Claude Code doesn't see the server | `mcpServers.gcp-tools.url` in `~/.claude/settings.json` matches the Cloud Run URL |
-| `403` on tool calls | Caller is missing `roles/run.invoker` on the service |
+| Claude Code doesn't see the server | `mcpServers.gcp-tools.url` in `~/.claude/settings.json` matches the Cloud Run URL (or GLB URL in GLB mode) |
+| `401` on tool calls | Token is missing or invalid. Check `ENABLE_TOKEN_VALIDATION` is `1` and the token is a valid Google credential |
+| `403` on tool calls | Token is valid but the caller's email is not in `ALLOWED_PRINCIPALS` |
 | Tool returns `{"error": "credentials_unavailable"}` locally | `gcloud auth application-default login` not yet run |
 | Tool returns `PERMISSION_DENIED` in prod | Service account needs the GCP role for whatever API the tool hits |

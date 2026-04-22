@@ -50,9 +50,65 @@ read -rp "Cloud Run region [us-central1]: " REGION </dev/tty
 REGION="${REGION:-us-central1}"
 ZONE="${REGION}-a"
 
+# --- GLB resources (if deployed) ---------------------------------------------
+log_step "delete GLB resources (if present)"
+for res_type_cmd in \
+  "forwarding-rules:claude-code-glb-fwd:--global" \
+  "target-https-proxies:claude-code-glb-https-proxy:--global" \
+  "url-maps:claude-code-glb-url-map:--global" \
+  "ssl-certificates:claude-code-glb-cert:--global"; do
+  IFS=':' read -r res_type res_name res_flag <<< "${res_type_cmd}"
+  if gcloud compute ${res_type} describe "${res_name}" ${res_flag} \
+     --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    run_cmd gcloud compute ${res_type} delete "${res_name}" ${res_flag} \
+      --project "${PROJECT_ID}" --quiet
+  fi
+done
+
+for backend in llm-gateway-backend mcp-gateway-backend dev-portal-backend admin-dashboard-backend; do
+  if gcloud compute backend-services describe "${backend}" --global \
+     --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    run_cmd gcloud compute backend-services delete "${backend}" --global \
+      --project "${PROJECT_ID}" --quiet
+  fi
+done
+
+for neg in llm-gateway-neg mcp-gateway-neg dev-portal-neg admin-dashboard-neg; do
+  if gcloud compute network-endpoint-groups describe "${neg}" \
+     --region "${REGION}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    run_cmd gcloud compute network-endpoint-groups delete "${neg}" \
+      --region "${REGION}" --project "${PROJECT_ID}" --quiet
+  fi
+done
+
+# Clean up DNS A records pointing to the GLB IP before deleting the IP.
+_glb_ip="$(gcloud compute addresses describe claude-code-glb-ip --global \
+  --project "${PROJECT_ID}" --format="value(address)" 2>/dev/null || echo "")"
+if [[ -n "${_glb_ip}" ]]; then
+  for _zone_name in $(gcloud dns managed-zones list --project "${PROJECT_ID}" \
+    --format="value(name)" 2>/dev/null); do
+    for _record in $(gcloud dns record-sets list --zone="${_zone_name}" \
+      --project "${PROJECT_ID}" --filter="type=A AND rrdatas=${_glb_ip}" \
+      --format="value(name)" 2>/dev/null); do
+      log_info "removing DNS A record ${_record} from zone ${_zone_name}"
+      run_cmd gcloud dns record-sets delete "${_record}" \
+        --zone="${_zone_name}" --type=A --project "${PROJECT_ID}" --quiet
+    done
+  done
+  run_cmd gcloud compute addresses delete claude-code-glb-ip --global \
+    --project "${PROJECT_ID}" --quiet
+fi
+
+# Also try self-signed cert cleanup.
+for cert in $(gcloud compute ssl-certificates list --project "${PROJECT_ID}" \
+  --filter="name~claude-code-glb-self-signed" --format="value(name)" 2>/dev/null); do
+  run_cmd gcloud compute ssl-certificates delete "${cert}" --global \
+    --project "${PROJECT_ID}" --quiet
+done
+
 # --- Cloud Run services -----------------------------------------------------
 log_step "delete Cloud Run services"
-for svc in llm-gateway mcp-gateway dev-portal; do
+for svc in llm-gateway mcp-gateway dev-portal admin-dashboard; do
   if gcloud run services describe "${svc}" --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
     run_cmd gcloud run services delete "${svc}" \
       --project "${PROJECT_ID}" --region "${REGION}" --quiet
@@ -78,7 +134,7 @@ fi
 
 # --- Service accounts -------------------------------------------------------
 log_step "delete service accounts"
-for sa in llm-gateway mcp-gateway claude-code-dev-vm dev-portal; do
+for sa in llm-gateway mcp-gateway claude-code-dev-vm dev-portal admin-dashboard; do
   email="${sa}@${PROJECT_ID}.iam.gserviceaccount.com"
   if gcloud iam service-accounts describe "${email}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
     run_cmd gcloud iam service-accounts delete "${email}" \

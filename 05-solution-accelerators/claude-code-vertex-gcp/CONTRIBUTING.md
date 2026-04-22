@@ -26,10 +26,28 @@ to the gateway service is extremely helpful.
 4. For any Terraform change, run `terraform fmt -recursive` and
    `terraform validate`.
 5. For any shell change, run `bash -n` on the touched scripts.
-6. Keep the beginner-friendly tone. Heavy comments are a feature, not a bug
+6. Run `scripts/pre-deploy-check.sh` before submitting — it validates
+   code consistency across deploy scripts, Terraform modules, and
+   application code (19 checks, no GCP access needed).
+7. Keep the beginner-friendly tone. Heavy comments are a feature, not a bug
    — don't strip them in the name of concision.
-7. Update `README.md`, `ARCHITECTURE.md`, `COSTS.md`, or
+8. Update `README.md`, `ARCHITECTURE.md`, `COSTS.md`, or
    `TROUBLESHOOTING.md` as needed when behavior changes.
+
+### Token validation sync requirement
+
+`gateway/app/token_validation.py` and `mcp-gateway/token_validation.py`
+must stay in sync — they are independent copies because the two services
+build separate containers. The pre-deploy check script (step 6 above)
+verifies this automatically. When editing one file, update the other to
+match (from the first `import` statement onward).
+
+### GLB validation
+
+If your change affects GLB, IAP, or auth behavior, run
+`scripts/validate-glb-demo.sh` against a live deployment to verify
+the 31-test suite across all 8 layers (infrastructure, config, auth,
+routing, dev VM, IAP, MCP, parity).
 
 ## What belongs in this repo
 

@@ -5,14 +5,19 @@ Vertex AI Anthropic endpoint. Runs on Cloud Run.
 
 Its **only jobs** are:
 
-1. Let Cloud Run's IAM layer authenticate the caller
-   (`roles/run.invoker`).
+1. Authenticate the caller — via app-level token validation middleware
+   (`token_validation.py`), which accepts both OAuth2 access tokens and
+   OIDC identity tokens. Cloud Run's built-in invoker IAM check is
+   disabled (`--no-invoker-iam-check`) because Claude Code sends access
+   tokens, which Cloud Run IAM rejects.
 2. Strip Anthropic-only beta headers Vertex doesn't accept.
 3. Replace the caller's bearer token with the gateway service account's
    token (obtained via ADC).
-4. Forward the request to the right Vertex regional host, stream the
+4. Normalize URL paths — auto-prepend `/v1/` when Claude Code omits it
+   (which it does when `ANTHROPIC_VERTEX_BASE_URL` is set).
+5. Forward the request to the right Vertex regional host, stream the
    response back.
-5. Emit a structured JSON log entry per request.
+6. Emit a structured JSON log entry per request.
 
 **It is not a format translator.** Claude Code with
 `CLAUDE_CODE_USE_VERTEX=1` already emits Vertex-format requests. We just
@@ -64,8 +69,11 @@ pip install pytest httpx  # httpx is already a dep, pytest is test-only
 pytest -q
 ```
 
-The tests mock out Google credentials and the upstream HTTP call; they
-run offline in ~1 second.
+The test suite includes `test_proxy.py` (proxy behavior) and
+`test_token_validation.py` (middleware unit tests covering health
+bypass, access-token and OIDC-token validation, 401/403 rejection,
+and `ALLOWED_PRINCIPALS` enforcement). All tests mock out Google
+credentials and upstream HTTP calls; they run offline in ~1 second.
 
 ## Building the container
 
@@ -86,18 +94,22 @@ provided by the attached service account automatically.
 ┌────────────────────┐
 │  Claude Code       │  Sends Vertex-format request with caller ADC
 └─────────┬──────────┘
-          │  (Cloud Run enforces roles/run.invoker)
+          │  Cloud Run invoker IAM disabled (--no-invoker-iam-check)
+          │  App-level token_validation.py handles auth instead
           ▼
-┌────────────────────┐
-│  app/main.py       │  Catch-all route, dispatches to proxy_request
-│  app/proxy.py      │  * Extracts caller email (from x-goog- headers)
-│                    │  * Strips anthropic-beta, Authorization, hop-by-hop
-│                    │  * Fetches fresh bearer via google-auth
-│                    │  * Streams to Vertex with httpx.AsyncClient
-│  app/headers.py    │  * Header sanitation rules
-│  app/auth.py       │  * Caller-identity extraction + ADC token
-│  app/logging_config│  * JSON-to-stdout for Cloud Logging
-└─────────┬──────────┘
+┌─────────────────────────┐
+│  app/main.py            │  Catch-all route, dispatches to proxy_request
+│  app/token_validation.py│  * Validates access + OIDC tokens
+│                         │  * Enforces ALLOWED_PRINCIPALS
+│  app/proxy.py           │  * Normalizes path (prepends /v1/ if missing)
+│                         │  * Extracts caller email (headers or middleware)
+│                         │  * Strips anthropic-beta, Authorization, hop-by-hop
+│                         │  * Fetches fresh bearer via google-auth
+│                         │  * Streams to Vertex with httpx.AsyncClient
+│  app/headers.py         │  * Header sanitation rules
+│  app/auth.py            │  * Caller-identity extraction + ADC token
+│  app/logging_config     │  * JSON-to-stdout for Cloud Logging
+└─────────┬───────────────┘
           ▼
 ┌────────────────────┐
 │  Vertex AI         │  us-east5-aiplatform.googleapis.com / aiplatform...
@@ -112,6 +124,8 @@ provided by the attached service account automatically.
 | `GOOGLE_CLOUD_PROJECT` | Project ID (logged in entries; also consulted by google-auth). | *(none; set by Cloud Run)* |
 | `VERTEX_DEFAULT_REGION` | Fallback Vertex region when the request path doesn't encode one. | `global` |
 | `VERTEX_PROJECT_ID` | Override for `GOOGLE_CLOUD_PROJECT` if logs need a different value. | *(unset)* |
+| `ENABLE_TOKEN_VALIDATION` | Set to `1` to enable app-level token validation middleware. Always enabled in production (`1`). When `0`, middleware is not registered (local dev only). | `1` |
+| `ALLOWED_PRINCIPALS` | Comma-separated emails allowed to call the gateway (e.g. `user@example.com,sa@proj.iam.gserviceaccount.com`). Only checked when token validation is enabled. Empty = any valid Google token accepted. | *(empty)* |
 
 ## Extending
 

@@ -48,7 +48,7 @@ Developer Laptop ──┐
  │                        │  Streamable HTTP)│                            │
  │                        └──────────────────┘                            │
  │                                                                        │
- │  Cloud Logging  ──▶  BigQuery sink  ──▶  Looker Studio dashboard       │
+ │  Cloud Logging  ──▶  BigQuery sink  ──▶  Admin Dashboard (Cloud Run)   │
  └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,7 +69,7 @@ Because the gateway gives you the things Vertex does not do for you:
   verifies the signature and the audience before forwarding.
 - **Structured logging.** Every request emits a Cloud Logging entry with
   caller identity, model, input/output token counts (pulled from Vertex's
-  response), latency, and status. This is what powers the Looker dashboard.
+  response), latency, and status. This is what powers the admin dashboard.
 - **Header sanitation.** Claude Code occasionally sends `anthropic-beta`
   headers for experimental features. Vertex rejects unknown beta headers.
   The gateway drops them before forwarding. (Claude Code also supports
@@ -83,9 +83,22 @@ Because the gateway gives you the things Vertex does not do for you:
 format when `CLAUDE_CODE_USE_VERTEX=1`. The gateway does not rewrite
 payloads. It is roughly 100 lines of FastAPI.
 
-**Ingress:** `internal-and-cloud-load-balancing`. Only reachable from within
-the VPC (or via IAP with a load balancer — covered in the optional PSC
-path). Requires `roles/run.invoker` on the caller.
+**Auth:** Cloud Run's built-in invoker IAM check is **disabled**
+(`--no-invoker-iam-check` / `invoker_iam_disabled = true` in Terraform).
+This is necessary because Claude Code sends **OAuth2 access tokens** (from
+ADC), which Cloud Run IAM rejects — it only accepts OIDC identity tokens.
+Instead, the gateway uses **app-level token validation** (`token_validation.py`
+middleware) that accepts both token types and enforces an `ALLOWED_PRINCIPALS`
+allowlist. Token validation is always on (`ENABLE_TOKEN_VALIDATION=1`).
+
+**Ingress:** `all` in standard mode (developer laptops reach the service
+directly; token validation is the security boundary). In GLB mode,
+`internal-and-cloud-load-balancing` (only the GLB can reach it).
+
+**Path normalization:** Claude Code omits the `/v1/` prefix from URL paths
+when `ANTHROPIC_VERTEX_BASE_URL` is set (e.g. `/projects/P/locations/R/...`
+instead of `/v1/projects/P/locations/R/...`). The gateway auto-prepends
+`/v1/` when missing, so both path formats work.
 
 **Identity:** dedicated service account with `roles/aiplatform.user` and
 `roles/logging.logWriter`. That service account — not the caller — is what
@@ -105,8 +118,9 @@ the current MCP spec.
 **Framework:** [FastMCP](https://github.com/jlowin/fastmcp) — the most
 ergonomic Python MCP server library and what Google's own examples use.
 
-**Ingress:** `internal-and-cloud-load-balancing`. Invocation requires
-`roles/run.invoker`. Same auth model as the LLM gateway.
+**Auth:** same model as the LLM gateway — Cloud Run invoker IAM is
+disabled; app-level token validation middleware handles auth. Token
+validation is always on.
 
 The shipped server has one example tool (`gcp_project_info`). See
 `mcp-gateway/ADD_YOUR_OWN_TOOL.md` for the beginner walkthrough.
@@ -122,9 +136,10 @@ scale. The portal has per-OS (macOS / Linux / Windows) copy-paste blocks and
 a button to download `developer-setup.sh`. New team members hit the URL and
 are self-service.
 
-**Ingress:** `internal-and-cloud-load-balancing` with IAP enforced. Access is
-granted to whichever Google group or principals you put in
-`access.allowed_principals`.
+**Ingress:** In **GLB mode**, `internal-and-cloud-load-balancing` with IAP
+enforced on the GLB backend — only Google identities in
+`access.allowed_principals` can open the page. In **standard mode** (no GLB),
+`--no-allow-unauthenticated` with `roles/run.invoker` grants per principal.
 
 ### 4. Dev VM (GCE, optional, off by default)
 
@@ -152,15 +167,16 @@ forgotten VMs don't rack up a bill.
 
 A log sink in the project routes all logs tagged with
 `resource.type="cloud_run_revision"` (filtered to our gateway services) into
-a BigQuery dataset. A Looker Studio template points at that dataset and
-gives admins:
+a BigQuery dataset. A **built-in Admin Dashboard** (deployed as a Cloud Run
+service by `deploy-observability.sh`) queries that dataset and gives admins:
 
 - Requests per user per day
 - Error rate over time
 - Top token consumers (users and models)
 - p50/p95/p99 latency by model
 
-See `observability/looker-studio-template.md` for setup.
+The dashboard auto-refreshes every 60 seconds. For a custom Looker Studio
+alternative, see `observability/looker-studio-template.md`.
 
 ---
 
@@ -195,10 +211,12 @@ default.
 
 ### No public IPs
 
-- Cloud Run uses `internal-and-cloud-load-balancing` ingress.
+- Cloud Run gateways use `ingress=all` in standard mode (token validation
+  is the security boundary) or `internal-and-cloud-load-balancing` in GLB
+  mode.
 - The dev VM is created with `--no-address`.
-- Developer access is always via IAP (tunnel for SSH, IAP-protected HTTPS
-  LB for web).
+- Developer access is via ADC-authenticated requests (standard mode) or
+  IAP (tunnel for SSH, IAP-protected HTTPS LB for web).
 
 ### Deployment-path compatibility (TF vs. gcloud scripts)
 
@@ -231,21 +249,23 @@ but already ran the gcloud path, the clean migration is:
 There are exactly three auth flows, all using Google identity:
 
 1. **Developer's laptop → Cloud Run gateway.** The developer runs
-   `gcloud auth application-default login`. Claude Code sends ADC-signed
-   requests directly to the public `*.run.app` URL. Cloud Run's
-   `internal-and-cloud-load-balancing` ingress setting still admits
-   these calls because ADC-authenticated requests are routed by
-   Google's managed load-balancer fleet, which the setting explicitly
-   allows; the platform then checks `roles/run.invoker` on the
-   caller before the request reaches the gateway container. An
-   **unauthenticated** request from the same laptop is rejected at
-   the platform layer (see Layer 6.1 in the e2e test suite).
+   `gcloud auth application-default login`. Claude Code sends
+   **OAuth2 access tokens** (from ADC) to the gateway's `*.run.app`
+   URL. Cloud Run's built-in invoker IAM check is **disabled**
+   (`--no-invoker-iam-check`) because it only accepts OIDC identity
+   tokens, not the access tokens Claude Code sends. Instead, the
+   gateway's **app-level token validation middleware**
+   (`token_validation.py`) verifies the token via Google's tokeninfo
+   endpoint (access tokens) or public key verification (OIDC tokens),
+   and enforces the `ALLOWED_PRINCIPALS` allowlist. An
+   **unauthenticated** request is rejected by the middleware with
+   401 (see Layer 6.1 in the e2e test suite).
 2. **Developer's laptop → Dev VM.**
    `gcloud compute ssh --tunnel-through-iap`. IAP checks
    `roles/iap.tunnelResourceAccessor` + `roles/compute.osLogin`.
 3. **LLM Gateway → Vertex AI.** The gateway's service account uses
    workload-identity-federated credentials (on Cloud Run, ADC just works).
-   Cloud Run IAM grants `roles/aiplatform.user` on that SA.
+   The SA has `roles/aiplatform.user` on the project.
 
 No shared secrets. No API keys in dotfiles. No bearer tokens to rotate.
 
@@ -307,9 +327,13 @@ snapshots become available for Opus / Sonnet), update
 
 ## What is intentionally NOT included
 
-- **No custom domain.** Cloud Run's default `*.run.app` URL is used.
-  Bringing your own domain is a straightforward extension but adds moving
-  parts.
+- **No custom domain by default.** Cloud Run's `*.run.app` URLs are used
+  in standard mode. The optional GLB frontend supports two SSL modes:
+  **(1) Google-managed certificate** with a custom domain (e.g.
+  `claude.example.com`) — the deploy script auto-creates a DNS A record
+  if Cloud DNS manages the parent zone; or **(2) self-signed certificate**
+  for IP-only access — `NODE_TLS_REJECT_UNAUTHORIZED=0` is injected
+  automatically into developer settings.
 - **No multi-project or multi-region HA.** This is a reference deployment,
   not a fault-tolerant production SaaS. Vertex itself is highly available;
   the gateway scales to zero and back.

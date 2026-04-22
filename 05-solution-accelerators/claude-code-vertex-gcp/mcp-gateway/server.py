@@ -150,6 +150,12 @@ app = FastAPI(
     lifespan=_lifespan,
 )
 
+if os.getenv("ENABLE_TOKEN_VALIDATION", "0") == "1":
+    from token_validation import validate_token_middleware
+
+    app.middleware("http")(validate_token_middleware)
+    log.info("token_validation_enabled")
+
 
 @app.get("/health")
 async def health() -> JSONResponse:

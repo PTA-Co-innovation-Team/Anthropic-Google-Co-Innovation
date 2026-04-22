@@ -53,11 +53,22 @@ if [[ "${_ds_check}" == "200" ]]; then
   log_info "dataset ${DATASET_ID} already exists"
 else
   log_info "creating dataset ${DATASET_ID}"
+  _ds_payload="$(python3 -c '
+import json, os, sys
+print(json.dumps({
+    "datasetReference": {
+        "datasetId": sys.argv[1],
+        "projectId": sys.argv[2],
+    },
+    "location": sys.argv[3],
+    "description": "Claude Code gateway logs",
+}))
+' "${DATASET_ID}" "${PROJECT_ID}" "${CR_REGION}")"
   run_cmd curl -sS -X POST \
     -H "Authorization: Bearer ${_bq_token}" \
     -H "Content-Type: application/json" \
     "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets" \
-    -d "{\"datasetReference\":{\"datasetId\":\"${DATASET_ID}\",\"projectId\":\"${PROJECT_ID}\"},\"location\":\"${CR_REGION}\",\"description\":\"Claude Code gateway logs\"}"
+    -d "${_ds_payload}"
 fi
 
 # --- Cloud Logging sink (idempotent) ----------------------------------------
@@ -97,6 +108,7 @@ else
   run_cmd gcloud iam service-accounts create "${SA_ID}" \
     --project "${PROJECT_ID}" \
     --display-name="Admin Dashboard (observability)"
+  wait_for_sa "${SA_EMAIL}"
 fi
 
 for role in roles/bigquery.dataViewer roles/bigquery.jobUser roles/logging.logWriter; do
@@ -115,13 +127,22 @@ run_cmd gcloud builds submit "${REPO_ROOT}/dashboard" \
 
 # --- Deploy Cloud Run service -----------------------------------------------
 log_step "deploy Cloud Run service ${SERVICE_NAME}"
+
+if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
+  INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
+  AUTH_FLAG="--no-allow-unauthenticated"
+else
+  INGRESS_FLAG="--ingress all"
+  AUTH_FLAG="--no-allow-unauthenticated"
+fi
+
 run_cmd gcloud run deploy "${SERVICE_NAME}" \
   --project "${PROJECT_ID}" \
   --region "${CR_REGION}" \
   --image "${IMAGE}" \
   --service-account "${SA_EMAIL}" \
-  --ingress internal-and-cloud-load-balancing \
-  --no-allow-unauthenticated \
+  ${INGRESS_FLAG} \
+  ${AUTH_FLAG} \
   --min-instances 0 --max-instances 2 \
   --cpu 1 --memory 256Mi \
   --port 8080 \
@@ -129,17 +150,7 @@ run_cmd gcloud run deploy "${SERVICE_NAME}" \
   --quiet
 
 # --- Grant invoker to principals -------------------------------------------
-if [[ -n "${PRINCIPALS}" ]]; then
-  log_step "grant roles/run.invoker to principals"
-  IFS=',' read -ra _principals <<<"${PRINCIPALS}"
-  for p in "${_principals[@]}"; do
-    p="${p## }"; p="${p%% }"
-    [[ -z "${p}" ]] && continue
-    run_cmd gcloud run services add-iam-policy-binding "${SERVICE_NAME}" \
-      --project "${PROJECT_ID}" --region "${CR_REGION}" \
-      --member="${p}" --role="roles/run.invoker" --quiet
-  done
-fi
+grant_run_invoker "${SERVICE_NAME}" "${PROJECT_ID}" "${CR_REGION}" "${PRINCIPALS}"
 
 URL="$(gcloud run services describe "${SERVICE_NAME}" \
         --project "${PROJECT_ID}" --region "${CR_REGION}" \

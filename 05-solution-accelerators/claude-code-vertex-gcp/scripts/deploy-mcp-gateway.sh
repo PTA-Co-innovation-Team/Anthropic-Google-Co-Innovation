@@ -15,14 +15,16 @@ print_help() {
   cat <<'HELP'
 Usage: deploy-mcp-gateway.sh [--help] [--dry-run]
 
-Builds + deploys the MCP gateway. Reads PROJECT_ID, REGION,
-FALLBACK_REGION, and PRINCIPALS from the environment.
+Builds + deploys the MCP gateway. Reads PROJECT_ID, REGION (Vertex
+region), FALLBACK_REGION (Cloud Run region), and PRINCIPALS from the
+environment.
 HELP
 }
 
 parse_common_flags "$@"
 
 : "${PROJECT_ID:?PROJECT_ID must be set}"
+: "${REGION:?REGION must be set}"
 : "${FALLBACK_REGION:?FALLBACK_REGION must be set}"
 : "${PRINCIPALS:=}"
 
@@ -52,6 +54,7 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" \
   run_cmd gcloud iam service-accounts create "${SA_ID}" \
     --project "${PROJECT_ID}" \
     --display-name="MCP Gateway (Claude Code tools)"
+  wait_for_sa "${SA_EMAIL}"
 fi
 
 log_step "grant SA roles/logging.logWriter"
@@ -66,30 +69,33 @@ run_cmd gcloud builds submit "${REPO_ROOT}/mcp-gateway" \
   --region "${CR_REGION}"
 
 log_step "deploy Cloud Run service ${SERVICE_NAME}"
+
+ALLOWED="${PRINCIPALS}"
+if [[ "${ENABLE_VM:-false}" == "true" ]]; then
+  ALLOWED="${ALLOWED},serviceAccount:claude-code-dev-vm@${PROJECT_ID}.iam.gserviceaccount.com"
+fi
+
+if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
+  INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
+else
+  INGRESS_FLAG="--ingress all"
+fi
+
+ENV_VARS="^;^GOOGLE_CLOUD_PROJECT=${PROJECT_ID};VERTEX_DEFAULT_REGION=${REGION};ENABLE_TOKEN_VALIDATION=1;ALLOWED_PRINCIPALS=${ALLOWED}"
+
 run_cmd gcloud run deploy "${SERVICE_NAME}" \
   --project "${PROJECT_ID}" \
   --region "${CR_REGION}" \
   --image "${IMAGE}" \
   --service-account "${SA_EMAIL}" \
-  --ingress internal-and-cloud-load-balancing \
+  ${INGRESS_FLAG} \
   --no-allow-unauthenticated \
+  --no-invoker-iam-check \
   --min-instances 0 --max-instances 5 \
   --cpu 1 --memory 512Mi \
   --port 8080 \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID}" \
+  --set-env-vars "${ENV_VARS}" \
   --quiet
-
-if [[ -n "${PRINCIPALS}" ]]; then
-  log_step "grant roles/run.invoker to principals"
-  IFS=',' read -ra _principals <<<"${PRINCIPALS}"
-  for p in "${_principals[@]}"; do
-    p="${p## }"; p="${p%% }"
-    [[ -z "${p}" ]] && continue
-    run_cmd gcloud run services add-iam-policy-binding "${SERVICE_NAME}" \
-      --project "${PROJECT_ID}" --region "${CR_REGION}" \
-      --member="${p}" --role="roles/run.invoker" --quiet
-  done
-fi
 
 URL="$(gcloud run services describe "${SERVICE_NAME}" \
         --project "${PROJECT_ID}" --region "${CR_REGION}" \

@@ -37,6 +37,25 @@ output "artifact_registry_repo" {
   value       = "${local.gce_region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}"
 }
 
+output "glb_ip" {
+  description = "Static IP of the Global Load Balancer. Empty when GLB is disabled."
+  value       = length(module.glb) > 0 ? module.glb[0].glb_ip : ""
+}
+
+output "glb_url" {
+  description = "HTTPS URL of the Global Load Balancer. Empty when GLB is disabled."
+  value       = length(module.glb) > 0 ? module.glb[0].glb_url : ""
+}
+
+output "llm_gateway_effective_url" {
+  description = "URL developers should use for the LLM gateway (GLB URL when enabled, otherwise Cloud Run URL)."
+  value = (
+    var.enable_glb && length(module.glb) > 0
+    ? module.glb[0].glb_url
+    : length(module.llm_gateway) > 0 ? module.llm_gateway[0].service_url : ""
+  )
+}
+
 output "next_steps" {
   description = "Human-readable hints for what to do after a successful apply."
   value = join("\n", compact([

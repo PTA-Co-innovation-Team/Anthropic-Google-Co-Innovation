@@ -159,3 +159,92 @@ resolve_repo_root() {
   log_error "could not locate repo root from ${script_dir}"
   return 1
 }
+
+# -----------------------------------------------------------------------------
+# wait_for_sa <sa_email> — wait for IAM to propagate a newly created SA.
+# GCP has eventual consistency between SA creation and IAM; without this
+# pause, `add-iam-policy-binding` fails with INVALID_ARGUMENT.
+# Only call this right after `gcloud iam service-accounts create`.
+# -----------------------------------------------------------------------------
+wait_for_sa() {
+  local sa_email="$1"
+  log_info "waiting for IAM propagation of ${sa_email}..."
+  local i
+  for i in 1 2 3; do
+    if gcloud iam service-accounts describe "${sa_email}" \
+         --format="value(email)" >/dev/null 2>&1; then
+      sleep 5
+      return 0
+    fi
+    sleep 5
+  done
+  log_warn "SA ${sa_email} not yet visible after 15s — proceeding anyway"
+}
+
+# -----------------------------------------------------------------------------
+# grant_run_invoker <service> <project> <region> <principals_csv>
+# Used by dev-portal, admin-dashboard, and other services that still use
+# Cloud Run IAM for auth. The LLM and MCP gateways use
+# --no-invoker-iam-check + app-level token_validation.py instead (so
+# they do NOT call this function).
+#
+# GLB mode: tries allUsers first (ingress is the boundary). If an org policy
+# blocks allUsers, falls back to per-principal bindings. The first failure is
+# cached in a temp file so subsequent services skip the attempt silently.
+# Standard mode: always per-principal.
+# -----------------------------------------------------------------------------
+grant_run_invoker() {
+  local service="$1" project="$2" region="$3" principals="${4:-}"
+  local _cache="/tmp/.claude-code-allusers-${project}"
+
+  if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
+    log_step "grant Cloud Run invoker on ${service} (GLB mode)"
+
+    if [[ ! -f "${_cache}" ]]; then
+      if gcloud run services add-iam-policy-binding "${service}" \
+           --project "${project}" --region "${region}" \
+           --member="allUsers" --role="roles/run.invoker" --quiet 2>/dev/null; then
+        return 0
+      fi
+      echo "blocked" > "${_cache}"
+      log_info "org policy blocks allUsers — using per-principal Cloud Run auth"
+    fi
+  else
+    [[ -z "${principals}" ]] && return 0
+    log_step "grant roles/run.invoker to principals on ${service}"
+  fi
+
+  if [[ -z "${principals}" ]]; then
+    log_warn "no principals configured; callers will need roles/run.invoker granted manually"
+    return 0
+  fi
+  IFS=',' read -ra _principals <<<"${principals}"
+  for p in "${_principals[@]}"; do
+    p="${p## }"; p="${p%% }"
+    [[ -z "${p}" ]] && continue
+    run_cmd gcloud run services add-iam-policy-binding "${service}" \
+      --project "${project}" --region "${region}" \
+      --member="${p}" --role="roles/run.invoker" --quiet
+  done
+}
+
+# -----------------------------------------------------------------------------
+# resolve_glb_url <project_id> — print the best GLB URL to stdout.
+# Priority: GLB_DOMAIN env var > claude-code-glb-ip static IP > return 1.
+# Callers decide their own fallback (Cloud Run discovery, error, etc.).
+# -----------------------------------------------------------------------------
+resolve_glb_url() {
+  local project_id="${1:?project_id required}"
+  if [[ -n "${GLB_DOMAIN:-}" ]]; then
+    echo "https://${GLB_DOMAIN}"
+    return 0
+  fi
+  local ip
+  ip="$(gcloud compute addresses describe claude-code-glb-ip --global \
+    --project "${project_id}" --format="value(address)" 2>/dev/null || echo "")"
+  if [[ -n "${ip}" ]]; then
+    echo "https://${ip}"
+    return 0
+  fi
+  return 1
+}

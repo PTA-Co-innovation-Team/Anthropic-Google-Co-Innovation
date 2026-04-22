@@ -33,6 +33,13 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+
+    # Used by the GLB module to generate a self-signed certificate
+    # when no domain is provided (IP-only access).
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 

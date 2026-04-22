@@ -78,9 +78,10 @@ module "llm_gateway" {
   region             = local.gce_region
   vertex_region      = var.region
   image              = var.llm_gateway_image
-  allowed_principals = var.allowed_principals
+  allowed_principals = local.gateway_allowed_principals
   vpc_connector_name = module.network.vpc_connector_name
   use_vpc_connector  = var.use_vpc_connector
+  enable_glb         = var.enable_glb
   labels             = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
@@ -95,10 +96,12 @@ module "mcp_gateway" {
 
   project_id         = var.project_id
   region             = local.gce_region
+  vertex_region      = var.region
   image              = var.mcp_gateway_image
-  allowed_principals = var.allowed_principals
+  allowed_principals = local.gateway_allowed_principals
   vpc_connector_name = module.network.vpc_connector_name
   use_vpc_connector  = var.use_vpc_connector
+  enable_glb         = var.enable_glb
   labels             = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
@@ -115,6 +118,7 @@ module "dev_portal" {
   region             = local.gce_region
   image              = var.dev_portal_image
   allowed_principals = var.allowed_principals
+  enable_glb         = var.enable_glb
   labels             = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
@@ -138,8 +142,16 @@ module "dev_vm" {
   auto_shutdown_idle_hours = var.dev_vm_auto_shutdown_idle_hours
   install_vscode_server    = var.dev_vm_install_vscode_server
   allowed_principals       = var.allowed_principals
-  llm_gateway_url          = var.enable_llm_gateway ? module.llm_gateway[0].service_url : ""
-  mcp_gateway_url          = var.enable_mcp_gateway ? module.mcp_gateway[0].service_url : ""
+  llm_gateway_url = (
+    var.enable_glb && length(module.glb) > 0
+    ? module.glb[0].glb_url
+    : var.enable_llm_gateway ? module.llm_gateway[0].service_url : ""
+  )
+  mcp_gateway_url = (
+    var.enable_glb && length(module.glb) > 0
+    ? module.glb[0].glb_url
+    : var.enable_mcp_gateway ? module.mcp_gateway[0].service_url : ""
+  )
   vertex_region            = var.region
   labels                   = local.labels
 }
@@ -156,4 +168,25 @@ module "observability" {
   labels     = local.labels
 
   depends_on = [google_project_service.apis]
+}
+
+# -----------------------------------------------------------------------------
+# Global Load Balancer (optional).
+# -----------------------------------------------------------------------------
+module "glb" {
+  count  = var.enable_glb ? 1 : 0
+  source = "./modules/glb"
+
+  project_id               = var.project_id
+  region                   = local.gce_region
+  domain                   = var.glb_domain
+  iap_support_email        = var.iap_support_email
+  allowed_principals       = var.allowed_principals
+  llm_gateway_service_name      = var.enable_llm_gateway ? module.llm_gateway[0].service_name : ""
+  mcp_gateway_service_name      = var.enable_mcp_gateway ? module.mcp_gateway[0].service_name : ""
+  dev_portal_service_name       = var.enable_dev_portal ? module.dev_portal[0].service_name : ""
+  admin_dashboard_service_name  = var.admin_dashboard_service_name
+  labels                        = local.labels
+
+  depends_on = [module.llm_gateway, module.mcp_gateway, module.dev_portal]
 }

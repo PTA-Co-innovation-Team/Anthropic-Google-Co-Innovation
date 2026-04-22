@@ -123,6 +123,44 @@ ENABLE_MCP="$(_ask_bool "Deploy MCP gateway?" true)"
 ENABLE_PORTAL="$(_ask_bool "Deploy dev portal?" true)"
 ENABLE_VM="$(_ask_bool "Deploy dev VM (costs money)?" false)"
 ENABLE_OBS="$(_ask_bool "Install observability (log sink + BQ)?" true)"
+ENABLE_GLB="$(_ask_bool "Deploy Global Load Balancer? (enables access-token auth, ~\$18/month)" false)"
+
+GLB_DOMAIN=""
+GLB_CERT_MODE=""
+IAP_SUPPORT_EMAIL=""
+if [[ "${ENABLE_GLB}" == "true" ]]; then
+  echo "" >&2
+  echo "GLB SSL certificate options:" >&2
+  echo "  1) Google-managed certificate (requires a DNS domain you control)" >&2
+  echo "  2) Self-signed certificate (works immediately with IP only)" >&2
+  echo "" >&2
+  echo "Option 1 is recommended. Option 2 requires NODE_TLS_REJECT_UNAUTHORIZED=0" >&2
+  echo "in each developer's settings.json (developer-setup.sh sets this automatically)." >&2
+  echo "" >&2
+  read -rp "SSL certificate mode [1/2] (default: 2): " _cert_choice </dev/tty
+  _cert_choice="${_cert_choice:-2}"
+
+  if [[ "${_cert_choice}" == "1" ]]; then
+    GLB_CERT_MODE="managed"
+    read -rp "Base domain (e.g. dpeterside.altostrat.com): " _base_domain </dev/tty
+    if [[ -z "${_base_domain}" ]]; then
+      log_warn "no domain provided — falling back to self-signed certificate"
+      GLB_CERT_MODE="self-signed"
+    else
+      GLB_DOMAIN="claude.${_base_domain}"
+      log_info "GLB will be accessible at: https://${GLB_DOMAIN}"
+      log_info "DNS A record will be created automatically if Cloud DNS manages ${_base_domain}"
+    fi
+  else
+    GLB_CERT_MODE="self-signed"
+  fi
+
+  if [[ "${ENABLE_PORTAL}" == "true" ]]; then
+    default_support="$(gcloud config get-value account 2>/dev/null || echo "")"
+    read -rp "IAP support email for browser services [${default_support}]: " IAP_SUPPORT_EMAIL </dev/tty
+    IAP_SUPPORT_EMAIL="${IAP_SUPPORT_EMAIL:-${default_support}}"
+  fi
+fi
 
 # Principals.
 echo "" >&2
@@ -133,7 +171,7 @@ read -rp "Allowed principals [${default_me}]: " PRINCIPALS_INPUT </dev/tty
 PRINCIPALS_INPUT="${PRINCIPALS_INPUT:-${default_me}}"
 
 # ----- Write config.yaml ----------------------------------------------------
-CONFIG_OUT="${PWD}/config.yaml"
+CONFIG_OUT="${REPO_ROOT}/config.yaml"
 log_step "writing ${CONFIG_OUT}"
 
 # Build the YAML list of principals.
@@ -160,6 +198,12 @@ components:
   dev_vm: ${ENABLE_VM}
   dev_portal: ${ENABLE_PORTAL}
   observability: ${ENABLE_OBS}
+  glb: ${ENABLE_GLB}
+
+glb:
+  domain: "${GLB_DOMAIN}"
+  cert_mode: "${GLB_CERT_MODE}"
+  iap_support_email: "${IAP_SUPPORT_EMAIL}"
 
 access:
   allowed_principals:
@@ -183,7 +227,8 @@ fi
 
 # ----- Export env for component scripts -------------------------------------
 export PROJECT_ID REGION FALLBACK_REGION
-export ENABLE_LLM ENABLE_MCP ENABLE_PORTAL ENABLE_VM ENABLE_OBS
+export ENABLE_LLM ENABLE_MCP ENABLE_PORTAL ENABLE_VM ENABLE_OBS ENABLE_GLB
+export GLB_DOMAIN GLB_CERT_MODE IAP_SUPPORT_EMAIL
 export PRINCIPALS="${PRINCIPALS_INPUT}"
 
 # ----- Run component scripts ------------------------------------------------
@@ -198,6 +243,13 @@ REQUIRED_APIS=(
   secretmanager.googleapis.com serviceusage.googleapis.com bigquery.googleapis.com
 )
 run_cmd gcloud services enable "${REQUIRED_APIS[@]}" --project "${PROJECT_ID}"
+
+if [[ "${GLB_CERT_MODE:-}" == "managed" ]]; then
+  run_cmd gcloud services enable dns.googleapis.com --project "${PROJECT_ID}"
+fi
+
+# Clear stale allUsers cache from previous runs.
+rm -f /tmp/.claude-code-allusers-"${PROJECT_ID}" 2>/dev/null || true
 
 if [[ "${ENABLE_LLM}" == "true" ]]; then
   log_step "deploy-llm-gateway.sh"
@@ -217,6 +269,19 @@ fi
 if [[ "${ENABLE_OBS}" == "true" ]]; then
   log_step "deploy-observability.sh"
   bash "${REPO_ROOT}/scripts/deploy-observability.sh"
+fi
+
+if [[ "${ENABLE_GLB}" == "true" ]]; then
+  log_step "deploy-glb.sh"
+  bash "${REPO_ROOT}/scripts/deploy-glb.sh"
+
+  # Re-deploy portal with GLB URL now that the static IP exists.
+  # The first deploy (above) created the Cloud Run service with Cloud Run URLs
+  # in the HTML. Now we re-build with the GLB URL substituted instead.
+  if [[ "${ENABLE_PORTAL}" == "true" ]]; then
+    log_step "re-deploy dev portal with GLB URLs"
+    bash "${REPO_ROOT}/scripts/deploy-dev-portal.sh"
+  fi
 fi
 
 if [[ "${ENABLE_VM}" == "true" ]]; then
