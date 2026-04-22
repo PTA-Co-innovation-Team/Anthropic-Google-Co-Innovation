@@ -133,18 +133,31 @@ cd Anthropic-Google-Co-Innovation/05-solution-accelerators/claude-code-vertex-gc
 ./scripts/deploy.sh
 ```
 
-The script walks through five prompts:
+The script walks through six prompts:
 
 1. **GCP project ID** — defaults to your current gcloud config.
 2. **Vertex region** — interactive picker with `global` (recommended
    default), `us-east5`, `europe-west3`, etc. You can also type any
    region string by hand.
 3. **Component toggles** — one y/N per component (LLM gateway, MCP
-   gateway, dev portal, dev VM, observability).
-4. **Allowed principals** — comma-separated IAM members (e.g.
+   gateway, dev portal, dev VM, observability, Global Load Balancer).
+4. **GLB SSL certificate mode** *(if GLB was enabled)* — choose between:
+   - **Option 1: Google-managed certificate** — provide a base domain you
+     control (e.g. `dpeterside.altostrat.com`). The script auto-prepends
+     `claude.` to create the GLB domain (e.g. `claude.dpeterside.altostrat.com`)
+     and creates a DNS A record automatically if Cloud DNS manages the zone
+     in this project. The managed cert provisions within ~15 min after DNS
+     propagates.
+   - **Option 2: Self-signed certificate** — works immediately with IP only.
+     The deploy scripts automatically set `NODE_TLS_REJECT_UNAUTHORIZED=0`
+     in developer settings. Suitable for development/testing.
+   
+   If GLB is enabled with a dev portal, you'll also be asked for an
+   **IAP support email** for browser-based OAuth.
+5. **Allowed principals** — comma-separated IAM members (e.g.
    `user:[email protected],group:[email protected]`). Defaults to
    your own email.
-5. **Confirmation** — the script writes `config.yaml` to the current
+6. **Confirmation** — the script writes `config.yaml` to the current
    directory, displays it, and asks you to confirm before creating
    any resources.
 
@@ -339,30 +352,33 @@ Right after any successful deploy, run:
 ./scripts/e2e-test.sh
 ```
 
-This covers six validation layers. Each test records PASS, FAIL, or
+This covers seven validation layers. Each test records PASS, FAIL, or
 SKIP.
 
 | Layer | Tests | What it proves |
 | --- | --- | --- |
-| 1. Infrastructure | Cloud Run READY, no external IPs, SAs exist, subnet PGA, required APIs | The stack was provisioned correctly |
+| 1. Infrastructure | Cloud Run READY, no external IPs, SAs exist, subnet PGA, required APIs, admin dashboard, BigQuery dataset, logging sink | The stack was provisioned correctly |
 | 2. Network path | 1 Haiku request direct to Vertex | Vertex is reachable from your project with ADC |
 | 3. Gateway proxy | Gateway inference, log correlation, header stripping | Gateway works, logs correctly, strips betas |
+| 4. Dev portal | Portal responds, placeholders substituted | Dev portal is deployed with real URLs |
 | 5. MCP | /health GET, gcp_project_info tool call | MCP handshake and tool invocation work |
-| 6. Negative | Unauth → 403/401, no external IP on dev VM | Security posture is intact |
+| 6. Negative + Obs | Unauth → 403/401, no external IP on dev VM, dashboard health, dashboard API | Security posture + observability pipeline intact |
+| 7. GLB *(if configured)* | Health + inference via access/OIDC tokens, direct CR blocked, unauth rejected | GLB routing + token validation work (auto-discovered) |
 
-Expected final block:
+Expected final block (standard mode, all components deployed):
 
 ```
 ================================================================
   E2E Test Results
 ================================================================
-  Layer 1: Infrastructure              [5/5 PASS]
+  Layer 1: Infrastructure              [8/8 PASS]
   Layer 2: Network Path                [1/1 PASS]
   Layer 3: Gateway Proxy               [3/3 PASS]
+  Layer 4: Dev Portal                  [2/2 PASS]
   Layer 5: MCP Tools                   [2/2 PASS]
-  Layer 6: Negative                    [2/2 PASS]
+  Layer 6: Negative + Obs              [4/4 PASS]
 ----------------------------------------------------------------
-  TOTAL: 13 PASS, 0 FAIL, 0 SKIPPED
+  TOTAL: 20 PASS, 0 FAIL, 0 SKIPPED
 ================================================================
 ```
 
@@ -410,8 +426,10 @@ The script:
 
 1. Verifies `gcloud` is installed and authenticated.
 2. Runs `gcloud auth application-default login` (opens a browser).
-3. Prompts for project, gateway URL, MCP URL, region (or reads them
-   from the environment).
+3. Auto-discovers the gateway URL (checks GLB domain/IP first, then
+   falls back to Cloud Run service URL) and offers it as the default
+   in the interactive prompt for project, gateway URL, MCP URL, and
+   region (or reads them from the environment).
 4. Installs the Claude Code CLI globally via
    `npm install -g @anthropic-ai/claude-code` if the `claude`
    command is not already on `PATH`. Requires Node.js/npm
@@ -557,8 +575,12 @@ top hits:
 | HTTP 429 from the gateway | Vertex quota — request increase; short-term switch `CLOUD_ML_REGION=global` |
 | "Model not available in region" | Enable the model in Model Garden; or switch to `global`; or use `VERTEX_REGION_CLAUDE_*` per-model override |
 | `gcloud compute ssh --tunnel-through-iap` hangs | Caller lacks `roles/iap.tunnelResourceAccessor`; VM is stopped; or IAP firewall rule missing |
-| Gateway returns 403 | Caller not in `allowed_principals`; re-run deploy to reconcile IAM |
-| Gateway returns 401 | Caller has no ADC — run `gcloud auth application-default login` |
+| Gateway returns 403 | Caller not in `allowed_principals` (GLB mode: check `ALLOWED_PRINCIPALS` env var); re-run deploy to reconcile IAM |
+| Gateway returns 401 | Caller has no ADC — run `gcloud auth application-default login`. GLB mode: check response body for `missing_token` vs `invalid_token` |
+| Gateway returns 502 | Upstream Vertex unreachable — check SA has `roles/aiplatform.user`, subnet has PGA, model is enabled |
+| GLB returns 404 | URL map path rules missing — re-run `scripts/deploy-glb.sh` |
+| SSL cert stuck in PROVISIONING | DNS A record not pointing at GLB IP yet; wait 15–60 min after DNS propagates |
+| Admin dashboard empty | Send a request through the gateway first; wait ~60s for BigQuery ingestion |
 | `terraform apply` fails with billing error | Link a billing account to the project |
 | `terraform` state lock error | `terraform force-unlock <LOCK_ID>` after confirming no other apply is running |
 
@@ -566,10 +588,11 @@ top hits:
 
 ## 12. Tear down
 
-Removes Cloud Run services, the dev VM, the IAP firewall rule, and
-the four service accounts. Does **not** remove the Artifact Registry
-repo (keeps built images for a fast re-deploy), the BigQuery dataset
-(may contain historical logs of value), or the enabled APIs.
+Removes GLB resources (if present), Cloud Run services (including the
+admin dashboard), the dev VM, the IAP firewall rule, and the five
+service accounts. Does **not** remove the Artifact Registry repo (keeps
+built images for a fast re-deploy), the BigQuery dataset (may contain
+historical logs of value), or the enabled APIs.
 
 ```bash
 ./scripts/teardown.sh

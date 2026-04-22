@@ -25,3 +25,9 @@ variable "labels" {
   type        = map(string)
   default     = {}
 }
+
+variable "enable_glb" {
+  description = "When true, restrict ingress to GLB and allow unauthenticated (IAP is the auth boundary)."
+  type        = bool
+  default     = false
+}

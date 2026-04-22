@@ -4,10 +4,10 @@
 #
 # Builds the LLM gateway container, pushes to Artifact Registry, and
 # deploys a Cloud Run service with the right flags:
-#   * ingress = internal-and-cloud-load-balancing
-#   * --no-allow-unauthenticated  (IAM enforces invoker)
+#   * --no-invoker-iam-check (Cloud Run IAM rejects ADC access tokens;
+#     app-level token_validation.py middleware handles auth instead)
+#   * ENABLE_TOKEN_VALIDATION=1 with ALLOWED_PRINCIPALS
 #   * dedicated service account with roles/aiplatform.user
-#   * per-principal roles/run.invoker
 #
 # Idempotent: re-running rebuilds + redeploys, which Cloud Run handles
 # with a new revision.
@@ -67,6 +67,7 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" \
   run_cmd gcloud iam service-accounts create "${SA_ID}" \
     --project "${PROJECT_ID}" \
     --display-name="LLM Gateway (Claude Code → Vertex)"
+  wait_for_sa "${SA_EMAIL}"
 fi
 
 # --- SA IAM: Vertex caller + log writer -------------------------------------
@@ -85,31 +86,33 @@ run_cmd gcloud builds submit "${REPO_ROOT}/gateway" \
 
 # --- Deploy Cloud Run service -----------------------------------------------
 log_step "deploy Cloud Run service ${SERVICE_NAME}"
+
+ALLOWED="${PRINCIPALS}"
+if [[ "${ENABLE_VM:-false}" == "true" ]]; then
+  ALLOWED="${ALLOWED},serviceAccount:claude-code-dev-vm@${PROJECT_ID}.iam.gserviceaccount.com"
+fi
+
+if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
+  INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
+else
+  INGRESS_FLAG="--ingress all"
+fi
+
+ENV_VARS="^;^GOOGLE_CLOUD_PROJECT=${PROJECT_ID};VERTEX_DEFAULT_REGION=${REGION};ENABLE_TOKEN_VALIDATION=1;ALLOWED_PRINCIPALS=${ALLOWED}"
+
 run_cmd gcloud run deploy "${SERVICE_NAME}" \
   --project "${PROJECT_ID}" \
   --region "${CR_REGION}" \
   --image "${IMAGE}" \
   --service-account "${SA_EMAIL}" \
-  --ingress internal-and-cloud-load-balancing \
+  ${INGRESS_FLAG} \
   --no-allow-unauthenticated \
+  --no-invoker-iam-check \
   --min-instances 0 --max-instances 10 \
   --cpu 1 --memory 512Mi \
   --port 8080 \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},VERTEX_DEFAULT_REGION=${REGION}" \
+  --set-env-vars "${ENV_VARS}" \
   --quiet
-
-# --- Grant invoker to each principal ----------------------------------------
-if [[ -n "${PRINCIPALS}" ]]; then
-  log_step "grant roles/run.invoker to principals"
-  IFS=',' read -ra _principals <<<"${PRINCIPALS}"
-  for p in "${_principals[@]}"; do
-    p="${p## }"; p="${p%% }"
-    [[ -z "${p}" ]] && continue
-    run_cmd gcloud run services add-iam-policy-binding "${SERVICE_NAME}" \
-      --project "${PROJECT_ID}" --region "${CR_REGION}" \
-      --member="${p}" --role="roles/run.invoker" --quiet
-  done
-fi
 
 # --- Print the URL ----------------------------------------------------------
 URL="$(gcloud run services describe "${SERVICE_NAME}" \

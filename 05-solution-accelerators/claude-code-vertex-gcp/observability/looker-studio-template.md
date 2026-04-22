@@ -1,4 +1,10 @@
-# Looker Studio dashboard setup
+# Looker Studio dashboard setup (optional)
+
+> **Note:** The deploy scripts now create a **built-in Admin Dashboard**
+> (Cloud Run service) that provides real-time charts out of the box — no
+> Looker Studio setup required. This guide is for teams that want a
+> **custom** Looker Studio dashboard with their own panels and sharing
+> permissions.
 
 The `observability` Terraform module creates a BigQuery dataset called
 **`claude_code_logs`** and a Cloud Logging sink that routes all

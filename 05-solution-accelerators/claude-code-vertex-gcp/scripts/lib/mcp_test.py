@@ -20,8 +20,8 @@ Example:
     mcp_test.py https://mcp-gateway-xxx-uc.a.run.app gcp_project_info
     mcp_test.py https://... add '{"x":1,"y":2}'
 
-Auth: uses the caller's Application Default Credentials to mint a
-bearer token. This is the same identity Claude Code would use.
+Auth: mints an OIDC identity token or falls back to an ADC access token.
+The MCP gateway's token_validation.py middleware accepts both token types.
 """
 
 from __future__ import annotations
@@ -41,13 +41,23 @@ import google.auth.transport.requests
 _ACCEPT = "application/json, text/event-stream"
 
 
-def _token() -> str:
-    """Return an OAuth bearer token for the caller's ADC identity."""
-    creds, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    creds.refresh(google.auth.transport.requests.Request())
-    return creds.token
+def _token(audience: str) -> str:
+    """Return a bearer token for calling the MCP gateway.
+
+    Prefers an OIDC identity token; falls back to an ADC access token.
+    The gateway's token_validation.py middleware accepts both.
+    """
+    try:
+        import google.oauth2.id_token  # noqa: PLC0415
+        return google.oauth2.id_token.fetch_id_token(
+            google.auth.transport.requests.Request(), audience
+        )
+    except Exception:  # noqa: BLE001
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        creds.refresh(google.auth.transport.requests.Request())
+        return creds.token
 
 
 def _post(url: str, token: str, session_id: str | None, body: dict) -> tuple[int, dict, str | None]:
@@ -105,15 +115,15 @@ def main() -> int:
     tool_name = sys.argv[2]
     tool_args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
 
-    # FastMCP mounts Streamable HTTP at /mcp/ (trailing slash). The
-    # server we ship mounts at /mcp with inner path /, so either works;
-    # we try /mcp first.
-    mcp_url = f"{base_url}/mcp"
+    # FastMCP mounts Streamable HTTP at /mcp/ (trailing slash). POST to
+    # /mcp returns a 307 redirect that urllib won't follow, so we use
+    # the canonical path with trailing slash.
+    mcp_url = f"{base_url}/mcp/"
 
     try:
-        token = _token()
+        token = _token(base_url)
     except Exception as e:  # noqa: BLE001
-        print(f"FAIL: ADC unavailable: {e}")
+        print(f"FAIL: credentials unavailable: {e}")
         return 1
 
     # --- 1. initialize -----------------------------------------------------

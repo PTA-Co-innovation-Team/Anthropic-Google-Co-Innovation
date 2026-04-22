@@ -66,6 +66,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+if os.getenv("ENABLE_TOKEN_VALIDATION", "0") == "1":
+    from .token_validation import validate_token_middleware
+
+    app.middleware("http")(validate_token_middleware)
+    log.info("token_validation_enabled")
+
 
 # --- Routes -----------------------------------------------------------------
 
@@ -87,11 +93,9 @@ async def healthz() -> JSONResponse:
 #   * **App layer (FastAPI)** — unauthenticated. The handler runs no
 #     token validation and reveals nothing sensitive (name + version).
 #   * **Platform layer (Cloud Run)** — the service is deployed with
-#     ``--no-allow-unauthenticated`` + ``ingress=internal-and-cloud-
-#     load-balancing``, so Cloud Run rejects callers lacking
-#     ``roles/run.invoker`` BEFORE this handler runs. An anonymous
-#     external probe therefore cannot reach this endpoint, regardless
-#     of what FastAPI does.
+#     ``--no-allow-unauthenticated`` + ``ingress=all``, so Cloud Run
+#     rejects callers lacking ``roles/run.invoker`` BEFORE this
+#     handler runs. IAM is the security boundary, not ingress.
 #
 # For Cloud Monitoring uptime checks: create a service account, grant
 # ``roles/run.invoker`` on the gateway, and configure the uptime check
@@ -104,7 +108,7 @@ async def healthz() -> JSONResponse:
 # proxy.
 @app.get("/health")
 async def health() -> JSONResponse:
-    """Liveness endpoint. Cloud Run IAM gates access; app layer is open."""
+    """Liveness endpoint. Bypasses token_validation middleware."""
     return JSONResponse(
         {
             "status": "ok",

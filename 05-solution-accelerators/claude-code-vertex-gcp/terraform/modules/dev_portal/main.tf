@@ -1,9 +1,8 @@
 # =============================================================================
 # Dev Portal module.
 #
-# Cloud Run service serving the static welcome page. Ingress is
-# internal-and-cloud-load-balancing; IAM gates invocation to the
-# allowed_principals list.
+# Cloud Run service serving the static welcome page. Ingress is all;
+# IAM gates invocation to the allowed_principals list.
 # =============================================================================
 
 locals {
@@ -25,7 +24,7 @@ resource "google_cloud_run_v2_service" "portal" {
   location = var.region
   labels   = var.labels
 
-  ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  ingress = var.enable_glb ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
 
   template {
     service_account = google_service_account.sa.email
@@ -48,6 +47,15 @@ resource "google_cloud_run_v2_service" "portal" {
           memory = "256Mi"
         }
       }
+
+      startup_probe {
+        http_get {
+          path = "/healthz"
+        }
+        initial_delay_seconds = 2
+        period_seconds        = 5
+        failure_threshold     = 3
+      }
     }
   }
 
@@ -60,10 +68,19 @@ resource "google_cloud_run_v2_service" "portal" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "invokers" {
-  for_each = toset(var.allowed_principals)
+  for_each = var.enable_glb ? toset([]) : toset(var.allowed_principals)
   project  = var.project_id
   location = var.region
   name     = google_cloud_run_v2_service.portal.name
   role     = "roles/run.invoker"
   member   = each.value
+}
+
+resource "google_cloud_run_v2_service_iam_member" "allow_unauthenticated" {
+  count    = var.enable_glb ? 1 : 0
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.portal.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
 }

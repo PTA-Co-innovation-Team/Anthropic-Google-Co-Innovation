@@ -34,12 +34,24 @@ When this is done deploying, your GCP project will contain:
 | --- | --- | --- |
 | **LLM Gateway** | Cloud Run service — tiny FastAPI reverse proxy | Single point for auth, logging, and header sanitation in front of Vertex AI |
 | **MCP Gateway** | Cloud Run service — FastMCP over Streamable HTTP | Place to host your organization's custom MCP tools |
-| **Dev Portal** | Cloud Run static site, IAP-protected | Self-service setup instructions for your developers |
+| **Dev Portal** | Cloud Run static site | Self-service setup instructions for your developers (IAP-protected in GLB mode, Cloud Run IAM in standard mode) |
 | **Dev VM** *(optional, off by default)* | GCE VM with VS Code Server, accessed via IAP | Cloud dev environment for teams that don't want local installs |
 | **Observability** | Log sink → BigQuery + built-in admin dashboard | Admin dashboard: who is using Claude, how much, errors, top models |
 
-All Cloud Run services use **internal-only ingress**. The Dev VM has **no public
-IP** and is reached via IAP TCP tunneling. There is no public surface area.
+**Standard mode:** The LLM and MCP gateways use **app-level token validation**
+(`token_validation.py` middleware) that accepts both OAuth2 access tokens and
+OIDC identity tokens. Cloud Run's built-in invoker IAM check is disabled
+(`--no-invoker-iam-check`) because Claude Code sends access tokens, which
+Cloud Run IAM rejects. Ingress is `all` so developer laptops can reach the
+services directly; the token validation middleware is the security boundary.
+An `ALLOWED_PRINCIPALS` allowlist controls who can call the gateways.
+
+**GLB mode** *(optional):* A Global HTTP(S) Load Balancer sits in front of
+all services. Ingress is `internal-and-cloud-load-balancing`; the GLB is the
+only entry point. Gateways use the same app-level token validation as
+standard mode; portal and dashboard use IAP for browser auth.
+
+The Dev VM has **no public IP** and is reached via IAP TCP tunneling.
 
 ```
 Developer Laptop ──(gcloud auth + IAP)──▶ LLM Gateway (Cloud Run) ──▶ Vertex AI (Claude)
@@ -186,9 +198,11 @@ This will:
 2. Run `gcloud auth application-default login` (opens a browser).
 3. Install the Claude Code CLI via `npm install -g @anthropic-ai/claude-code`
    if `claude` is not already on `PATH` (requires Node.js/npm already installed).
-4. Write `~/.claude/settings.json` with the right environment variables
+4. Auto-discover the gateway URL (checks GLB domain/IP first, then falls back
+   to Cloud Run service URL) and offer it as the default in the interactive prompt.
+5. Write `~/.claude/settings.json` with the right environment variables
    (Claude Code reads from here). It asks before overwriting an existing file.
-5. Send a test request through the gateway to prove the round-trip works.
+6. Send a test request through the gateway to prove the round-trip works.
 
 The settings file will look roughly like this:
 
@@ -210,6 +224,22 @@ Then just run `claude` — you're on Vertex.
 
 ## Validating your deployment
 
+### Pre-deploy checks (no GCP access needed)
+
+Before deploying, run the local code-consistency checker:
+
+```bash
+./scripts/pre-deploy-check.sh
+```
+
+This runs 19 checks validating that GLB + hybrid-auth changes are
+internally consistent across deploy scripts, Terraform modules, and
+application code (unit tests, token_validation.py sync, middleware
+registration, deploy script GLB conditionals, Terraform variable
+wiring, teardown coverage). No GCP credentials required.
+
+### Post-deploy e2e tests
+
 Right after `deploy.sh` (or `terraform apply`) finishes, run the
 end-to-end test script to confirm everything is wired up correctly:
 
@@ -217,16 +247,32 @@ end-to-end test script to confirm everything is wired up correctly:
 ./scripts/e2e-test.sh
 ```
 
-This runs six layers of checks — infrastructure sanity, direct Vertex
-reachability, gateway proxy behavior, MCP tool invocation, and
-negative tests (unauth rejection, no public IP on the dev VM). It
-prints a PASS/FAIL/SKIP summary and exits non-zero on any failure.
+This runs seven layers of checks — infrastructure sanity, direct Vertex
+reachability, gateway proxy behavior, MCP tool invocation, dev VM
+verification, negative tests (unauth rejection, no public IP), and
+GLB-specific tests. The GLB URL is auto-discovered from the project's
+static IP or `GLB_DOMAIN` environment variable (you can also pass it
+explicitly with `--glb-url`). It prints a PASS/FAIL/SKIP summary and
+exits non-zero on any failure.
 
 For a faster smoke test (5 checks, <30 seconds):
 
 ```bash
 ./scripts/e2e-test.sh --quick
 ```
+
+### GLB-specific validation
+
+When GLB is enabled, run the dedicated GLB validation suite:
+
+```bash
+./scripts/validate-glb-demo.sh --project $PROJECT_ID
+```
+
+This runs 31 tests across 8 layers: GLB infrastructure, Cloud Run
+configuration, auth flows (access tokens, OIDC tokens, rejection),
+URL map routing, dev VM integration, IAP bindings, MCP through GLB,
+and bash/Terraform parity. The GLB URL is auto-discovered.
 
 See [TEST-AND-DEMO-PLAN.md](../../03-demos/claude-code-vertex-gcp/TEST-AND-DEMO-PLAN.md) for the full
 validation procedure, including the manual Layer 4 (laptop) and Layer
@@ -235,13 +281,23 @@ machine.
 
 ### External uptime probes
 
-Both gateways expose a `GET /health` endpoint, but note the **auth
-posture**: Cloud Run is deployed with `--no-allow-unauthenticated`
-and `ingress=internal-and-cloud-load-balancing`, so even the unauth
-app-layer `/health` handler is gated by IAM at the platform layer.
-An anonymous external HTTP probe **cannot reach it**.
+Both gateways expose a `GET /health` endpoint, but the auth posture
+depends on deployment mode:
 
-To run a Cloud Monitoring uptime check against `/health`:
+**Standard mode:** Cloud Run uses `--no-invoker-iam-check` with
+`ingress=all` and app-level token validation. The `/health` endpoint
+bypasses the token validation middleware, so an anonymous external
+probe **can reach it** directly.
+
+**GLB mode:** `/health` bypasses the token validation middleware (so
+GLB health probes work). However, only the GLB can reach Cloud Run
+(`ingress=internal-and-cloud-load-balancing`), so external probes
+must hit the GLB URL: `https://<glb-ip-or-domain>/health`. The
+GLB's own health probes are automatic; for external monitoring,
+point an uptime check at the GLB URL with no auth header (the
+health endpoint is intentionally open).
+
+#### SA-authenticated probe (standard mode)
 
 1. **Create a service account** for the probe:
    ```bash
@@ -295,6 +351,64 @@ The seeder issues small Haiku requests (~$0.001 each, hard-capped at
 
 ---
 
+## Global Load Balancer + IAP (Optional)
+
+By default, both standard and GLB modes use **app-level token validation**
+(`token_validation.py` middleware) that accepts both OAuth2 access tokens
+and OIDC identity tokens. Cloud Run's invoker IAM check is disabled because
+Claude Code sends access tokens, which Cloud Run IAM rejects.
+
+The **Global Load Balancer (GLB)** option adds a unified entry point,
+custom domain support, IAP for browser-facing services (portal, dashboard),
+and Cloud Armor WAF capabilities.
+
+### Architecture
+
+| Service | Auth mechanism | Why |
+| --- | --- | --- |
+| LLM Gateway | App-level middleware (no IAP) | Claude Code sends access tokens |
+| MCP Gateway | App-level middleware (no IAP) | MCP client sends access tokens |
+| Dev Portal | IAP (browser OAuth flow) | Users access via browser |
+| Admin Dashboard | IAP (browser OAuth flow) | Users access via browser |
+
+All Cloud Run services: `ingress=internal-and-cloud-load-balancing` +
+`--no-invoker-iam-check`. The GLB becomes the only entry point.
+
+### Enable
+
+**Script path:**
+```bash
+./scripts/deploy.sh
+# Answer "yes" to "Deploy Global Load Balancer?"
+```
+
+**Terraform path:**
+```hcl
+# terraform.tfvars
+enable_glb        = true
+glb_domain        = "claude.yourcompany.com"  # optional, IP-only if empty
+iap_support_email = "admin@yourcompany.com"   # required for IAP on portal
+```
+
+### Cost
+
+The GLB adds ~$18/month (forwarding rule). Data processing is
+negligible for API traffic. Google-managed SSL cert is free.
+
+### Verify
+
+```bash
+# Access token works through GLB (the whole point):
+ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
+curl -sS -w "%{http_code}" -H "Authorization: Bearer $ACCESS_TOKEN" "$GLB_URL/health"
+# Expected: 200
+
+# Full e2e suite including GLB tests (GLB URL is auto-discovered):
+./scripts/e2e-test.sh
+```
+
+---
+
 ## Cost summary
 
 Idle is the common case. Typical monthly costs:
@@ -304,6 +418,7 @@ Idle is the common case. Typical monthly costs:
 | **Default, idle** (LLM gateway + MCP gateway + portal, no dev VM, Private Google Access) | **~$0–5/month** |
 | **Default, light use** (a few developers) | **~$10–30/month** (Vertex tokens dominate) |
 | **Everything on** (incl. shared dev VM `e2-small`, log sink to BigQuery) | **~$25–50/month** |
+| **+ GLB** (add to any configuration above) | **+~$18/month** |
 
 See [COSTS.md](../../04-best-practice-guides/claude-code-vertex-gcp/COSTS.md) for the line-by-line breakdown.
 
@@ -316,8 +431,11 @@ Token costs for Claude on Vertex follow
 ## Troubleshooting
 
 If setup or a request fails, check [TROUBLESHOOTING.md](../../04-best-practice-guides/claude-code-vertex-gcp/TROUBLESHOOTING.md)
-first — it covers the common issues (region availability, experimental-beta
-header rejections, IAP tunnel problems, quota 429s, gcloud auth).
+first — it covers deployment issues, authentication (ADC, IAM, IAP, token
+validation), runtime errors (beta headers, quotas, 502s), GLB-specific
+problems (SSL certs, URL map routing, IAP loops, auto-discovery), MCP
+handshake failures, observability pipeline debugging, and a detailed
+e2e/GLB test failure reference table.
 
 ---
 

@@ -7,8 +7,12 @@ hit the URL, copy three commands, and they're done.
 - **Tech:** nginx-alpine serving hand-written HTML/CSS. No JS framework,
   no build step, no dependencies.
 - **Size:** ~10 MB container, scales to zero on Cloud Run.
-- **Auth:** IAP in front of Cloud Run. Only Google identities in
-  `access.allowed_principals` can open the page.
+- **Auth:** In **GLB mode**, IAP in front of the GLB backend handles
+  browser-based OAuth — only Google identities in
+  `allowed_principals` can open the page. In **standard mode** (no
+  GLB), Cloud Run IAM (`roles/run.invoker`) is the auth boundary.
+  In both modes, Cloud Run ingress is restricted appropriately
+  (`internal-and-cloud-load-balancing` for GLB, `all` for standard).
 
 ---
 
@@ -19,13 +23,19 @@ time:
 
 | Placeholder | Replaced with |
 | --- | --- |
-| `__LLM_GATEWAY_URL__` | The LLM gateway's Cloud Run URL |
-| `__MCP_GATEWAY_URL__` | The MCP gateway's Cloud Run URL |
+| `__LLM_GATEWAY_URL__` | The LLM gateway URL (GLB URL when GLB is enabled, Cloud Run URL otherwise) |
+| `__MCP_GATEWAY_URL__` | The MCP gateway URL (GLB URL when GLB is enabled, Cloud Run URL otherwise) |
 | `__PROJECT_ID__` | The GCP project ID |
 | `__REGION__` | The Vertex region (e.g. `global`) |
 
-`scripts/deploy-dev-portal.sh` runs `envsubst` over `index.html`, then
-builds the container. The substituted HTML is what ships.
+`scripts/deploy-dev-portal.sh` runs `sed` substitution over `index.html`,
+then builds the container. The substituted HTML is what ships.
+
+In **GLB mode**, the portal is deployed twice: once before the GLB (to
+create the Cloud Run service needed by the GLB's serverless NEG), then
+again after the GLB is created (to substitute the GLB URL into the HTML
+instead of the now-unreachable Cloud Run URL). The deploy script
+auto-discovers the GLB URL via domain or static IP.
 
 ---
 

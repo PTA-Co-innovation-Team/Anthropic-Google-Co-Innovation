@@ -133,10 +133,11 @@ The architecture was engineered against five explicit goals, all of
 which are enforced by automated tests in `scripts/e2e-test.sh` so
 regressions are caught at deploy time.
 
-1. **Zero public attack surface.** All Cloud Run services use
-   `internal-and-cloud-load-balancing` ingress. The optional dev VM
-   has no external IP. Developer access is brokered by Google
-   identity (ADC for HTTPS, IAP tunnel for SSH).
+1. **Zero unauthenticated attack surface.** Cloud Run gateways use
+   app-level token validation (accepts both OAuth2 access tokens and
+   OIDC identity tokens) with an `ALLOWED_PRINCIPALS` allowlist. The
+   optional dev VM has no external IP. Developer access is brokered
+   by Google identity (ADC for HTTPS, IAP tunnel for SSH).
 2. **Google identity only.** Every actor in the system — developer,
    gateway, dev VM — authenticates via a Google identity. There are
    zero API keys, zero bearer tokens in dotfiles, zero shared
@@ -161,7 +162,7 @@ regressions are caught at deploy time.
 
 ```
 Developer Laptop ──┐
-                   │  gcloud ADC + Cloud Run IAM  /  IAP TCP tunnel
+                   │  gcloud ADC + token validation  /  IAP TCP tunnel
                    ▼
  ┌─────────────────────────── Google Cloud Project ───────────────────────────┐
  │                                                                            │
@@ -183,7 +184,7 @@ Developer Laptop ──┐
  │                        │   (Cloud Run)    │                                │
  │                        └──────────────────┘                                │
  │                                                                            │
- │   Cloud Logging  ──▶  BigQuery sink  ──▶  Looker Studio dashboard          │
+ │   Cloud Logging  ──▶  BigQuery sink  ──▶  Admin Dashboard (Cloud Run)      │
  └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -230,11 +231,12 @@ everything else in the stack is organized around it.
 | File | Responsibility |
 | --- | --- |
 | `app/main.py` | FastAPI app wiring — lifespan-managed shared `httpx.AsyncClient`, `/healthz` (legacy) and `/health` liveness endpoints, catch-all `/{full:path}` route dispatching to the proxy logic. Catch-all never captures the two health routes because FastAPI matches explicit paths first. |
-| `app/proxy.py` | Pass-through reverse proxy. Computes the correct Vertex regional host from the inbound URL (`global` → `aiplatform.googleapis.com`; `us-east5` → `us-east5-aiplatform.googleapis.com`; etc.), sanitizes headers, attaches a fresh gateway-SA bearer token, streams the response body back via `StreamingResponse` + `BackgroundTask`, and emits one structured log entry per request. |
+| `app/proxy.py` | Pass-through reverse proxy. Computes the correct Vertex regional host from the inbound URL (`global` → `aiplatform.googleapis.com`; `us-east5` → `us-east5-aiplatform.googleapis.com`; etc.), normalizes the URL path (auto-prepends `/v1/` when Claude Code omits it), sanitizes headers, attaches a fresh gateway-SA bearer token, streams the response body back via `StreamingResponse` + `BackgroundTask`, and emits one structured log entry per request. |
 | `app/auth.py` | Caller-identity extraction (`X-Goog-Authenticated-User-Email` from IAP or Cloud Run) and gateway-side credential management (`google.auth.default` with the `cloud-platform` scope, thread-safe refresh). |
 | `app/headers.py` | Header sanitation rules. Exact drops (`Authorization`, `Host`, `Content-Length`, `X-Cloud-Trace-*`, forwarded-*), hop-by-hop drops per RFC 7230 § 6.1, prefix drops (`anthropic-beta`, `x-goog-`). Returns the cleaned header dict plus a list of stripped header names for structured logging. |
 | `app/logging_config.py` | JSON-to-stdout formatter. Cloud Logging auto-parses JSON lines from Cloud Run containers; everything passed via Python's `logging.LogRecord.extra` becomes a queryable `jsonPayload` field. Uvicorn loggers are routed through the same handler so access logs are also JSON. |
-| `tests/test_proxy.py` | Four pytest cases with a mocked `httpx.AsyncClient`: happy-path regional routing, header sanitation + bearer replacement, 403 upstream relay, health endpoint does not fan out upstream. Offline, no Google credentials required. |
+| `app/token_validation.py` | App-level authentication middleware. Validates both OAuth2 access tokens (via Google's tokeninfo endpoint) and OIDC identity tokens (via public key verification). Enforces an `ALLOWED_PRINCIPALS` email allowlist. Health endpoints bypass validation. Always enabled (`ENABLE_TOKEN_VALIDATION=1`). |
+| `tests/test_proxy.py` | Nine pytest cases with a mocked `httpx.AsyncClient`: happy-path regional routing, header sanitation + bearer replacement, 403 upstream relay, health endpoints, accept-encoding stripping, and path normalization (with/without `/v1/` prefix, regional and global). Offline, no Google credentials required. |
 | `Dockerfile` | Multi-stage Python 3.12-slim build. Builder installs into `/opt/venv`; runtime image copies the venv, adds a non-root `app` user, exposes `$PORT` with uvicorn as CMD. Final image ~120 MB. |
 | `requirements.txt` | `fastapi`, `uvicorn[standard]`, `httpx`, `google-auth`, `google-cloud-logging`. All minor-version-pinned. |
 
@@ -254,11 +256,11 @@ of importance:
    A customer can rotate regions, add quota shaping, change default
    models, or move to a specific region for data residency by
    redeploying one Cloud Run service.
-4. **Single IAM surface.** Instead of granting every developer
-   `roles/aiplatform.user` on the project, developers only need
-   `roles/run.invoker` on the gateway. The gateway's own service
-   account is the only principal with Vertex access, which narrows
-   the audit surface dramatically.
+4. **Single auth surface.** Instead of granting every developer
+   `roles/aiplatform.user` on the project, developers only need to
+   be listed in the gateway's `ALLOWED_PRINCIPALS` allowlist. The
+   gateway's own service account is the only principal with Vertex
+   access, which narrows the audit surface dramatically.
 
 **Traffic shape:** streaming POSTs ranging from ~4 KB (short prompts)
 to ~800 KB (long-context conversations with caching). The gateway
@@ -284,12 +286,11 @@ do not buffer in memory.
 2025 MCP specification. SSE is explicitly avoided as it is deprecated
 in the current spec.
 
-**Authentication posture:** both `/mcp` and `/health` are gated by
-Cloud Run IAM (`roles/run.invoker`). The `/health` handler itself
-performs no auth, which matters for the Cloud Monitoring uptime-check
-pattern where a service account mints bearer tokens — the platform
-IAM check admits the request and the open handler returns 200
-cheaply.
+**Authentication posture:** same as the LLM gateway — Cloud Run's
+invoker IAM check is disabled; the app-level `token_validation.py`
+middleware validates tokens and enforces the `ALLOWED_PRINCIPALS`
+allowlist. The `/health` endpoint bypasses the middleware (so Cloud
+Run startup probes and monitoring checks work without a token).
 
 ### 5.3 Dev Portal (Cloud Run, nginx)
 
@@ -302,7 +303,7 @@ cheaply.
 | --- | --- |
 | `public/index.html` | Single static page. Shows the deployment coordinates (gateway URL, MCP URL, project, region), per-OS setup instructions in three tabs (macOS / Linux / Windows-via-WSL2), and a preview of the `~/.claude/settings.json` that `developer-setup.sh` will write. Uses four placeholders (`__LLM_GATEWAY_URL__`, `__MCP_GATEWAY_URL__`, `__PROJECT_ID__`, `__REGION__`) replaced at build time by `scripts/deploy-dev-portal.sh`. |
 | `public/styles.css` | Vanilla CSS in Google blue (`#1a73e8`) + neutrals. No framework dependency; page renders instantly. |
-| `Dockerfile` | `nginx:1.27-alpine`. Uses nginx's built-in `/etc/nginx/templates/` envsubst mechanism so `$PORT` from Cloud Run is honored without a shell wrapper. Also exposes a trivial `/healthz`. |
+| `Dockerfile` | `nginx:1.27-alpine`. URL placeholders (`__LLM_GATEWAY_URL__`, etc.) in `index.html` are substituted by `deploy-dev-portal.sh` using `sed` *before* the Docker image is built. At container startup, nginx's built-in `/etc/nginx/templates/` envsubst mechanism handles `$PORT` from Cloud Run — no shell wrapper needed. Also exposes a trivial `/healthz`. |
 
 **Why a static portal?** Two reasons. First, new team members need
 a single URL they can be sent. Second, the substituted URLs in the
@@ -310,10 +311,10 @@ portal come from the specific deployment, so there is no generic "go
 figure out your gateway URL" step — the page *is* the deployment's
 identity.
 
-**Ingress & auth:** internal-and-cloud-load-balancing, IAP-protected,
-with `run.invoker` grants for every identity in
-`access.allowed_principals`. The portal is not a secret, but there's
-no reason to expose it to the internet either.
+**Ingress & auth:** In **GLB mode**, `internal-and-cloud-load-balancing`
+with IAP on the GLB backend (browser OAuth flow). In **standard mode**,
+`--no-allow-unauthenticated` with `roles/run.invoker` grants per
+principal. In both modes, the portal is not publicly accessible.
 
 ### 5.4 Developer VM (GCE, optional)
 
@@ -388,18 +389,21 @@ least-privileged:
 | `dev-portal@…` | Runs the dev portal. The portal is static — no GCP API access needed. | *(none)* |
 | `claude-code-dev-vm@…` | Attached to the dev VM. Lets a developer on the VM call Vertex directly if needed, and writes startup-script diagnostics. | `roles/aiplatform.user`, `roles/logging.logWriter` |
 
-Per-principal IAM bindings are granted on the Cloud Run services
-themselves (`roles/run.invoker` on `llm-gateway`, `mcp-gateway`,
-`dev-portal`) and at the project level for the dev VM
-(`roles/iap.tunnelResourceAccessor`, `roles/compute.osLogin`). The
-list of allowed principals is the single `access.allowed_principals`
-field in `config.yaml` / `terraform.tfvars`.
+The LLM and MCP gateways use **app-level token validation** instead
+of Cloud Run IAM — Cloud Run's invoker check is disabled because
+Claude Code sends OAuth2 access tokens that Cloud Run IAM rejects.
+The `ALLOWED_PRINCIPALS` environment variable controls who can call
+these gateways. Per-principal `roles/run.invoker` bindings are still
+used for `dev-portal` and `admin-dashboard`. Dev VM access uses
+`roles/iap.tunnelResourceAccessor` + `roles/compute.osLogin` at the
+project level. The list of allowed principals is the single
+`access.allowed_principals` field in `config.yaml` / `terraform.tfvars`.
 
 ### 5.7 Observability
 
-**Path:** `terraform/modules/observability/`,
-`observability/looker-studio-template.md`,
-`observability/log-queries.md`
+**Path:** `terraform/modules/observability/`, `dashboard/`,
+`observability/log-queries.md`,
+`observability/looker-studio-template.md` (optional)
 **Role:** centralized visibility into gateway traffic.
 
 **Pipeline:**
@@ -416,10 +420,10 @@ Cloud Logging
 BigQuery dataset `claude_code_logs`
         │   partitioned tables, retention = log_retention_days
         ▼
-Looker Studio dashboard (6 panels:
+Admin Dashboard (Cloud Run service —
   requests per day, by model, top callers,
   error rate, p50/p95/p99 latency,
-  beta-stripped audit)
+  auto-refreshes every 60s)
 ```
 
 The Terraform module creates the BigQuery dataset with a partition
@@ -466,9 +470,9 @@ The only difference is the VPC posture (§5.5).
 | Layer | Coverage | Implementation |
 | --- | --- | --- |
 | Unit | FastAPI route handlers + proxy logic (happy path, header sanitation, 403 relay, /health no-fanout) | `pytest` in `gateway/tests/`, mocks `httpx.AsyncClient` + `google.auth` |
-| End-to-end | Six layers: infrastructure sanity, direct Vertex reachability, gateway proxy behaviour, MCP tool invocation, negative tests | `scripts/e2e-test.sh` — Bash with PASS/FAIL/SKIP tallying, per-layer summary, `--quick` smoke mode |
+| End-to-end | Seven layers: infrastructure sanity (incl. admin dashboard, BigQuery, logging sink), direct Vertex reachability, gateway proxy behaviour, dev portal, MCP tool invocation, negative + observability tests, GLB (auto-discovered) | `scripts/e2e-test.sh` — Bash with PASS/FAIL/SKIP tallying, per-layer summary, `--quick` smoke mode |
 | MCP handshake | Full `initialize` → `notifications/initialized` → `tools/call` flow, handling both JSON and SSE response framings | `scripts/lib/mcp_test.py` Python helper invoked from the bash script |
-| Demo seeding | Controlled Haiku traffic to populate Looker | `scripts/seed-demo-data.sh` — 20-prompt corpus, 200-request hard cap, pacing over configurable duration |
+| Demo seeding | Controlled Haiku traffic to populate admin dashboard | `scripts/seed-demo-data.sh` — 20-prompt corpus, 200-request hard cap, pacing over configurable duration |
 
 ### 5.10 Documentation
 
@@ -505,19 +509,22 @@ model IDs.
 
 **1. Claude Code builds a Vertex-format request.**
 Because `CLAUDE_CODE_USE_VERTEX=1` is set, the SDK emits a
-`POST /v1/projects/<project>/locations/<region>/publishers/anthropic/models/<model>:rawPredict`
-request with a Vertex payload shape. The `Authorization` header
-carries an ADC-signed bearer token for the developer's Google
-identity.
+`POST /projects/<project>/locations/<region>/publishers/anthropic/models/<model>:rawPredict`
+request with a Vertex payload shape. Note: Claude Code omits the
+`/v1/` prefix when `ANTHROPIC_VERTEX_BASE_URL` is set. The
+`Authorization` header carries an OAuth2 access token from ADC for
+the developer's Google identity.
 
-**2. Cloud Run's platform IAM admits or rejects.**
+**2. App-level token validation admits or rejects.**
 The request arrives at the LLM gateway's `*.run.app` hostname.
-Cloud Run's ingress setting (`internal-and-cloud-load-balancing`)
-admits calls from the Google managed load-balancer fleet, which
-includes ADC-signed calls. Cloud Run then checks the caller's
-identity against the service's IAM policy; callers without
-`roles/run.invoker` are rejected with 403 **before** the FastAPI
-container sees the request.
+Cloud Run's built-in invoker IAM check is **disabled**
+(`--no-invoker-iam-check`) because it only accepts OIDC identity
+tokens — Claude Code sends OAuth2 access tokens. Instead, the
+`token_validation.py` middleware validates the token (via Google's
+tokeninfo endpoint for access tokens or public key verification for
+OIDC tokens) and checks the caller's email against the
+`ALLOWED_PRINCIPALS` allowlist. Callers without a valid token get
+401; callers not in the allowlist get 403.
 
 **3. FastAPI dispatches to the proxy route.**
 The catch-all `/{full:path}` handler in `gateway/app/main.py`
@@ -539,10 +546,13 @@ This token is injected as the outbound `Authorization` header. The
 gateway is the Vertex-facing principal; the caller's identity is
 captured separately for logging.
 
-**6. Regional host resolution.**
-`proxy._vertex_host_for_region` inspects the URL path — it extracts
-the `locations/<region>/` segment. If `<region>` is `global`, the
-upstream host is `aiplatform.googleapis.com`; otherwise it's
+**6. Path normalization + regional host resolution.**
+`proxy._normalize_path` prepends `/v1/` if the inbound path lacks
+a version prefix (Claude Code omits it when
+`ANTHROPIC_VERTEX_BASE_URL` is set). Then
+`proxy._vertex_host_for_region` extracts the `locations/<region>/`
+segment. If `<region>` is `global`, the upstream host is
+`aiplatform.googleapis.com`; otherwise it's
 `<region>-aiplatform.googleapis.com`. This lets a single gateway
 serve requests to any region without per-region configuration.
 
@@ -575,8 +585,8 @@ BigQuery.
 
 **10. Dashboard ingest.**
 Within 60 seconds the log entry appears as a row in the BigQuery
-partitioned table. The Looker Studio dashboard queries that table
-on refresh; no additional glue is required.
+partitioned table. The admin dashboard queries BigQuery on refresh
+(every 60 seconds); no additional glue is required.
 
 Latency overhead imposed by the gateway is ≤50 ms at p95 for cold
 instances, ≤10 ms at p95 for warm. Streaming responses have no
@@ -605,15 +615,19 @@ flow uses:
 Compromising a laptop therefore compromises exactly one user's
 identity, which can be revoked in IAM in seconds.
 
-### 7.2 Ingress
+### 7.2 Ingress and auth
 
-All Cloud Run services use
-`INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER`. This admits traffic from
-the VPC and from Google's managed load-balancer fleet, which covers
-the ADC-signed request path used by Claude Code. Public anonymous
-requests are rejected at the platform layer. The dev VM has no
-external IP. There are no public firewall rules on ports other than
-the IAP range for 22/8080.
+In **standard mode**, Cloud Run gateways use `ingress=all` so
+developer laptops can reach them directly. Cloud Run's built-in
+invoker IAM check is **disabled** (`--no-invoker-iam-check`) because
+Claude Code sends OAuth2 access tokens that Cloud Run IAM rejects.
+Auth is handled by the app-level `token_validation.py` middleware,
+which validates tokens and enforces the `ALLOWED_PRINCIPALS`
+allowlist. Unauthenticated requests are rejected by the middleware
+(401). In **GLB mode**, ingress is
+`internal-and-cloud-load-balancing` so only the GLB can reach the
+services. The dev VM has no external IP. There are no public
+firewall rules on ports other than the IAP range for 22/8080.
 
 ### 7.3 Egress
 
@@ -650,9 +664,9 @@ permissions granted at runtime.
 | Vertex region returns 429 | `jsonPayload.status_code=429` in the dashboard | Request quota increase; short-term, switch `CLOUD_ML_REGION` to `global` |
 | Gateway Cloud Run revision fails to deploy | `e2e-test.sh` Layer 1.1 | Inspect `status.conditions` on the service; re-run `deploy-llm-gateway.sh` (idempotent) |
 | Experimental-beta header rejected | `e2e-test.sh` Layer 3.3 | Rebuild the gateway image with the current `headers.py` rules |
-| BigQuery sink stops writing | Empty Looker dashboard | Verify `sink_writer_identity` still has `bigquery.dataEditor` on the dataset |
+| BigQuery sink stops writing | Empty admin dashboard | Verify `sink_writer_identity` still has `bigquery.dataEditor` on the dataset |
 | Dev VM runs out of disk | `df` on the VM | Increase `dev_vm_disk_size_gb` and re-apply; disk growth is online |
-| Developer loses `run.invoker` | Claude Code shows 403 | Ensure they're in `access.allowed_principals` and re-run `deploy-*-gateway.sh` |
+| Developer not in `ALLOWED_PRINCIPALS` | Claude Code shows 403 | Ensure they're in `access.allowed_principals` and re-run `deploy-*-gateway.sh` |
 
 ---
 
@@ -726,7 +740,7 @@ doing real work, expect $5–10/dev/month (light) to $50–100/dev/month
   rationale.
 - `DEPLOYMENT-GUIDE.md` — step-by-step installation companion to
   this document.
-- `TEST-AND-DEMO-PLAN.md` — six-layer validation procedure.
+- `TEST-AND-DEMO-PLAN.md` — seven-layer validation procedure.
 - `TROUBLESHOOTING.md` — comprehensive operations troubleshooting
   guide.
 - Vertex AI Anthropic documentation:

@@ -2,8 +2,12 @@
 # LLM Gateway module.
 #
 # One Cloud Run service, one dedicated service account, IAM bindings
-# granting the SA `roles/aiplatform.user` and the allowed principals
-# `roles/run.invoker`. Ingress is internal-and-cloud-load-balancing.
+# granting the SA `roles/aiplatform.user`.
+#
+# Auth: Cloud Run's invoker IAM check is disabled because Claude Code
+# sends ADC access tokens, which Cloud Run IAM rejects (it only accepts
+# OIDC identity tokens). The app-level token_validation.py middleware
+# handles auth instead, accepting both token types.
 # =============================================================================
 
 locals {
@@ -54,10 +58,8 @@ resource "google_cloud_run_v2_service" "gateway" {
   location = var.region
   labels   = var.labels
 
-  # internal-and-cloud-load-balancing keeps the service reachable only
-  # from inside the VPC (or via an IAP-fronted LB). It does NOT allow
-  # direct public access from the internet.
-  ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  ingress              = var.enable_glb ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
+  invoker_iam_disabled = true
 
   template {
     service_account = google_service_account.sa.email
@@ -100,11 +102,18 @@ resource "google_cloud_run_v2_service" "gateway" {
         value = var.vertex_region
       }
 
-      # Cloud Run's HTTP probe. If /healthz returns non-2xx for 3
-      # consecutive checks the instance is replaced.
+      env {
+        name  = "ENABLE_TOKEN_VALIDATION"
+        value = "1"
+      }
+      env {
+        name  = "ALLOWED_PRINCIPALS"
+        value = join(",", var.allowed_principals)
+      }
+
       startup_probe {
         http_get {
-          path = "/healthz"
+          path = "/health"
         }
         initial_delay_seconds = 2
         period_seconds        = 5
@@ -124,14 +133,7 @@ resource "google_cloud_run_v2_service" "gateway" {
   }
 }
 
-# --- Invoker IAM for allowed principals -------------------------------------
-# Iterates over the list, granting run.invoker to each identity so
-# Claude Code on their laptops can reach the service.
-resource "google_cloud_run_v2_service_iam_member" "invokers" {
-  for_each = toset(var.allowed_principals)
-  project  = var.project_id
-  location = var.region
-  name     = google_cloud_run_v2_service.gateway.name
-  role     = "roles/run.invoker"
-  member   = each.value
-}
+# --- Invoker IAM is disabled on this service ---------------------------------
+# Cloud Run's invoker IAM check is disabled (invoker_iam_disabled = true)
+# because Claude Code sends ADC access tokens which Cloud Run IAM rejects.
+# Auth is handled by the app-level token_validation.py middleware instead.

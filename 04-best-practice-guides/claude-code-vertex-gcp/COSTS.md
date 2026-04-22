@@ -62,7 +62,7 @@ shared `e2-small` realistically costs **~$5/month**.
 | Cloud Logging ingestion (first 50 GB/month free) | $0 for most setups |
 | BigQuery streaming inserts | $0.01 per 200 MB |
 | BigQuery storage (first 10 GB/month free) | ~$0 |
-| Looker Studio | **Free** |
+| Admin Dashboard (Cloud Run, scale-to-zero) | **$0–1** |
 
 Typical: **~$0–2/month**.
 
@@ -138,5 +138,5 @@ significantly. Plan for "Vertex tokens are the biggest bill, by far."
 2. Use the
    [Cost Breakdown report](https://console.cloud.google.com/billing/reports)
    with filters `service:Vertex AI` and `service:Cloud Run`.
-3. The Looker Studio dashboard this repo installs has a "tokens per user"
-   tab so you can see *who* is driving the bill.
+3. The admin dashboard this repo installs has a "top callers" panel so you
+   can see *who* is driving the bill.

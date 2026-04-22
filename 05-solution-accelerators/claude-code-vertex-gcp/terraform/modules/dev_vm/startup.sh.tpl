@@ -62,15 +62,33 @@ cat >/etc/claude-code/settings.json <<'JSON'
     "ANTHROPIC_VERTEX_PROJECT_ID": "${project_id}",
     "ANTHROPIC_VERTEX_BASE_URL": "${llm_gateway_url}",
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"
-  },
-  "mcpServers": {
-    "gcp-tools": {
-      "type": "http",
-      "url": "${mcp_gateway_url}/mcp"
-    }
   }
 }
 JSON
+
+# Accept self-signed GLB cert when gateway URL is IP-based.
+case "${llm_gateway_url}" in
+  https://[0-9]*)
+    python3 -c '
+import json
+p = "/etc/claude-code/settings.json"
+with open(p) as f: s = json.load(f)
+s["env"]["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+with open(p, "w") as f: json.dump(s, f, indent=2)
+'
+    ;;
+esac
+
+# Add MCP server config only when a gateway URL was provided.
+if [ -n "${mcp_gateway_url}" ]; then
+  python3 -c '
+import json, sys
+p = "/etc/claude-code/settings.json"
+with open(p) as f: s = json.load(f)
+s["mcpServers"] = {"gcp-tools": {"type": "http", "url": sys.argv[1]}}
+with open(p, "w") as f: json.dump(s, f, indent=2)
+' "${mcp_gateway_url}/mcp"
+fi
 
 cat >/etc/profile.d/claude-code-settings.sh <<'SH'
 # Link the shared Claude Code settings into the user's home on first

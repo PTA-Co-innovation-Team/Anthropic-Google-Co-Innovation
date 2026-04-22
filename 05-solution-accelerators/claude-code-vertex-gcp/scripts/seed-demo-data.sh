@@ -2,7 +2,7 @@
 # =============================================================================
 # seed-demo-data.sh — populate the observability dashboard with traffic.
 #
-# Why this exists: after a fresh deployment the Looker Studio dashboard
+# Why this exists: after a fresh deployment the admin dashboard
 # is empty. Empty charts make for a terrible demo. This script issues a
 # controlled volume of realistic-looking Claude Haiku requests through
 # the gateway so the dashboard has data to show.
@@ -42,7 +42,7 @@ print_help() {
 Usage: seed-demo-data.sh [options]
 
 Populates the deployment's Cloud Logging / BigQuery sink with enough
-realistic-looking Haiku traffic to make the Looker Studio dashboard
+realistic-looking Haiku traffic to make the admin dashboard
 interesting. All requests are billed to YOUR project and attributed
 to YOUR Google identity.
 
@@ -86,14 +86,23 @@ set -- "${_ARGS[@]:-}"
 # -----------------------------------------------------------------------------
 require_cmd gcloud
 require_cmd curl
+require_cmd python3
 
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 : "${PROJECT_ID:?--project required}"
 
 if [[ -z "${GATEWAY_URL}" ]]; then
-  GATEWAY_URL=$(gcloud run services describe llm-gateway \
-                  --project "${PROJECT_ID}" --region "${CR_REGION}" \
-                  --format="value(status.url)" 2>/dev/null || true)
+  GATEWAY_URL="$(resolve_glb_url "${PROJECT_ID}" || echo "")"
+  if [[ -n "${GATEWAY_URL}" ]]; then
+    if [[ "${GATEWAY_URL}" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+      CURL_K="-k"
+    fi
+    log_info "discovered GLB — using ${GATEWAY_URL}"
+  else
+    GATEWAY_URL=$(gcloud run services describe llm-gateway \
+                    --project "${PROJECT_ID}" --region "${CR_REGION}" \
+                    --format="value(status.url)" 2>/dev/null || true)
+  fi
 fi
 [[ -n "${GATEWAY_URL}" ]] || { log_error "could not discover gateway URL — pass --gateway-url"; exit 1; }
 
@@ -158,8 +167,9 @@ PROMPTS=(
 # -----------------------------------------------------------------------------
 # Request loop
 # -----------------------------------------------------------------------------
-TOKEN=$(gcloud auth application-default print-access-token 2>/dev/null)
-[[ -n "${TOKEN}" ]] || { log_error "no ADC token. Run: gcloud auth application-default login"; exit 1; }
+TOKEN=$(gcloud auth print-identity-token --audiences="${GATEWAY_URL%/}" 2>/dev/null \
+       || gcloud auth application-default print-access-token 2>/dev/null)
+[[ -n "${TOKEN}" ]] || { log_error "no credentials. Run: gcloud auth application-default login"; exit 1; }
 
 # Compute per-request sleep. Avoid dividing by zero.
 if (( TOTAL > 1 && DURATION_MIN > 0 )); then
@@ -179,17 +189,8 @@ log_step "sending ${TOTAL} requests"
 for ((u=1; u<=USERS; u++)); do
   for ((r=1; r<=PER_USER; r++)); do
     prompt="${PROMPTS[$(( (SENT) % ${#PROMPTS[@]} ))]}"
-    # JSON-escape naively: we know the prompts have no double quotes
-    # or backslashes that would break the payload. Hand-curated above.
-    body=$(cat <<JSON
-{
-  "anthropic_version": "vertex-2023-10-16",
-  "messages": [{"role":"user","content":"${prompt}"}],
-  "max_tokens": 8
-}
-JSON
-)
-    status=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL%/}${PATH_URL}" \
+    body=$(python3 -c 'import json,sys; print(json.dumps({"anthropic_version":"vertex-2023-10-16","messages":[{"role":"user","content":sys.argv[1]}],"max_tokens":8}))' "${prompt}")
+    status=$(curl -sS ${CURL_K:-} -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL%/}${PATH_URL}" \
               -H "Authorization: Bearer ${TOKEN}" \
               -H "Content-Type: application/json" \
               -d "${body}" || echo "000")
@@ -220,5 +221,5 @@ log_info "failures:          ${FAIL}"
 log_info "elapsed:           ${elapsed}s"
 log_info "approximate cost:  ${COST_DISPLAY}  (disclaimer: rough estimate)"
 log_info ""
-log_info "Give Cloud Logging ~1 min to flush, then open your Looker Studio"
-log_info "dashboard — the 'Requests per day' panel should now be populated."
+log_info "Give Cloud Logging ~1 min to flush, then open the admin dashboard"
+log_info "— the request volume charts should now be populated."

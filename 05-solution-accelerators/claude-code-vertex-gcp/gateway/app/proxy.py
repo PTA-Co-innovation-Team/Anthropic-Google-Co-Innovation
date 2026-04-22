@@ -16,6 +16,7 @@ when ``CLAUDE_CODE_USE_VERTEX=1``, and we pass it through unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -25,7 +26,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
-from .auth import extract_caller_identity, get_vertex_access_token
+from .auth import CallerIdentity, extract_caller_identity, get_vertex_access_token
 from .headers import sanitize_request_headers
 from .logging_config import get_logger
 
@@ -94,15 +95,30 @@ def _extract_model(path: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _extract_region_from_path(path: str) -> str:
-    """If the URL path starts with ``/v1/projects/<p>/locations/<r>/...``
-    pull ``<r>`` out and use it as the Vertex region. Otherwise use the
-    service-wide default.
+def _normalize_path(path: str) -> str:
+    """Ensure the path has a Vertex API version prefix.
+
+    Claude Code omits the ``/v1/`` prefix when ``ANTHROPIC_VERTEX_BASE_URL``
+    is set, sending paths like ``/projects/P/locations/R/...`` directly.
+    Vertex AI requires ``/v1/projects/...``, so we prepend it if missing.
     """
-    # The regex is anchored at start-of-path and tolerant of leading
-    # slashes. ``/v1beta1/`` is also a valid Vertex API prefix.
+    stripped = path.lstrip("/")
+    if not re.match(r"v\d", stripped):
+        return "/v1/" + stripped
+    return "/" + stripped
+
+
+def _extract_region_from_path(path: str) -> str:
+    """Pull the Vertex region from a path like ``/v1/projects/<p>/locations/<r>/...``."""
     match = re.match(
         r"^/?v\d[^/]*/projects/[^/]+/locations/([^/]+)/",
+        path,
+    )
+    if match:
+        return match.group(1)
+    # Also handle paths without the version prefix.
+    match = re.match(
+        r"^/?projects/[^/]+/locations/([^/]+)/",
         path,
     )
     if match:
@@ -115,7 +131,9 @@ def build_upstream_url(path: str, query: str) -> str:
 
     Args:
         path: Request path as seen by FastAPI, e.g.
-              ``/v1/projects/my-proj/locations/us-east5/publishers/anthropic/models/claude-opus-4-6:rawPredict``.
+              ``/v1/projects/my-proj/locations/us-east5/...`` or
+              ``/projects/my-proj/locations/us-east5/...`` (Claude Code
+              omits the version prefix with custom base URLs).
         query: Raw query string (no leading ``?``).
 
     Returns:
@@ -123,9 +141,7 @@ def build_upstream_url(path: str, query: str) -> str:
     """
     region = _extract_region_from_path(path)
     host = _vertex_host_for_region(region)
-
-    # Ensure there is exactly one leading slash on the path portion.
-    clean_path = "/" + path.lstrip("/")
+    clean_path = _normalize_path(path)
 
     url = f"https://{host}{clean_path}"
     if query:
@@ -163,6 +179,11 @@ async def proxy_request(
     caller = extract_caller_identity(
         {k.lower(): v for k, v in request.headers.items()}
     )
+    if caller.email is None and hasattr(request.state, "caller_email"):
+        caller = CallerIdentity(
+            email=request.state.caller_email,
+            source=getattr(request.state, "caller_source", "token_validation"),
+        )
     model = _extract_model(request.url.path)
     region = _extract_region_from_path(request.url.path)
 
@@ -170,7 +191,8 @@ async def proxy_request(
     cleaned, stripped = sanitize_request_headers(
         [(k, v) for k, v in request.headers.items()]
     )
-    cleaned["Authorization"] = f"Bearer {get_vertex_access_token()}"
+    token = await asyncio.to_thread(get_vertex_access_token)
+    cleaned["Authorization"] = f"Bearer {token}"
 
     # --- Build upstream URL ------------------------------------------------
     url = build_upstream_url(request.url.path, request.url.query)
@@ -213,13 +235,13 @@ async def proxy_request(
     )
 
     # --- Relay response ----------------------------------------------------
-    # Strip hop-by-hop headers on the way back too. ``Transfer-Encoding``
-    # in particular must not be forwarded, since FastAPI/Starlette will
-    # recompute framing.
+    # Strip hop-by-hop and framing headers that Starlette recomputes.
+    # ``content-encoding`` is intentionally preserved so the client can
+    # decode compressed payloads returned by Vertex.
     response_headers = {
         k: v
         for k, v in upstream.headers.items()
-        if k.lower() not in {"content-encoding", "transfer-encoding", "connection"}
+        if k.lower() not in {"transfer-encoding", "connection", "content-length"}
     }
 
     return StreamingResponse(

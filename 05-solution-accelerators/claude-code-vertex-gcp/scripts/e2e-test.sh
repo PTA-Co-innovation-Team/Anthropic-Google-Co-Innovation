@@ -37,6 +37,7 @@ REGION=""
 GATEWAY_URL=""
 MCP_URL=""
 PORTAL_URL=""
+GLB_URL=""
 CR_REGION=""  # where Cloud Run services live (not the Vertex region)
 
 print_help() {
@@ -50,6 +51,7 @@ Options:
   --gateway-url <url>  LLM gateway URL (else auto-discovered).
   --mcp-url <url>      MCP gateway URL (else auto-discovered).
   --portal-url <url>   Dev portal URL (else auto-discovered).
+  --glb-url <url>      GLB URL (enables Layer 7 GLB tests).
   --quick              Run smoke tests only (Layers 1.1, 2.1, 3.1, 3.2, 5.1).
   --verbose            Echo every command.
   -h, --help           This help.
@@ -69,6 +71,7 @@ while (($#)); do
     --gateway-url) GATEWAY_URL="$2"; shift 2 ;;
     --mcp-url) MCP_URL="$2"; shift 2 ;;
     --portal-url) PORTAL_URL="$2"; shift 2 ;;
+    --glb-url) GLB_URL="$2"; shift 2 ;;
     --quick) QUICK=1; shift ;;
     --verbose) VERBOSE=1; shift ;;
     -h|--help) print_help; exit 0 ;;
@@ -100,6 +103,12 @@ _describe_url() {
 [[ -z "${GATEWAY_URL}" ]] && GATEWAY_URL="$(_describe_url llm-gateway)"
 [[ -z "${MCP_URL}" ]]     && MCP_URL="$(_describe_url mcp-gateway)"
 [[ -z "${PORTAL_URL}" ]]  && PORTAL_URL="$(_describe_url dev-portal)"
+DASHBOARD_URL="$(_describe_url admin-dashboard)"
+
+if [[ -z "${GLB_URL}" ]]; then
+  GLB_URL="$(resolve_glb_url "${PROJECT_ID}" || echo "")"
+  [[ -n "${GLB_URL}" ]] && log_info "auto-discovered GLB URL: ${GLB_URL}"
+fi
 
 log_info "project:     ${PROJECT_ID}"
 log_info "region:      ${REGION}"
@@ -107,6 +116,8 @@ log_info "cr-region:   ${CR_REGION}"
 log_info "llm gateway: ${GATEWAY_URL:-<not deployed>}"
 log_info "mcp gateway: ${MCP_URL:-<not deployed>}"
 log_info "dev portal:  ${PORTAL_URL:-<not deployed>}"
+log_info "dashboard:   ${DASHBOARD_URL:-<not deployed>}"
+log_info "GLB:         ${GLB_URL:-<not configured>}"
 
 # -----------------------------------------------------------------------------
 # Test tracking
@@ -152,7 +163,13 @@ run_test() {
 
 # Mint an ADC bearer token once up front; refresh lazily if needed.
 _get_token() {
-  gcloud auth application-default print-access-token 2>/dev/null
+  local audience="${1:-}"
+  if [[ -n "${audience}" ]]; then
+    gcloud auth print-identity-token --audiences="${audience}" 2>/dev/null \
+      || gcloud auth application-default print-access-token 2>/dev/null
+  else
+    gcloud auth application-default print-access-token 2>/dev/null
+  fi
 }
 
 # Build the Vertex "rawPredict" URL for a given model + region.
@@ -193,14 +210,20 @@ test_1_1_cloud_run_services() {
 }
 
 test_1_2_no_public_ips() {
-  # gcloud compute addresses list returns reserved addresses. We assert
-  # nothing is EXTERNAL — ephemeral external IPs on VMs are caught in
-  # Layer 6.2.
+  # GLB creates a named static IP (claude-code-glb-ip) — that's expected.
+  # We only fail on UNEXPECTED external addresses.
   local ext
   ext=$(gcloud compute addresses list --project "${PROJECT_ID}" \
           --filter="addressType=EXTERNAL" \
           --format="value(name)" 2>/dev/null || true)
-  if [[ -n "${ext}" ]]; then echo "external addresses found: ${ext}"; return 1; fi
+  if [[ -n "${ext}" ]]; then
+    local filtered
+    filtered=$(echo "${ext}" | grep -v "^claude-code-glb-ip$" || true)
+    if [[ -n "${filtered}" ]]; then
+      echo "unexpected external addresses: ${filtered}"
+      return 1
+    fi
+  fi
 }
 
 test_1_3_service_accounts() {
@@ -225,7 +248,7 @@ test_1_4_private_google_access() {
 
 test_1_5_apis_enabled() {
   local missing=""
-  for api in aiplatform.googleapis.com run.googleapis.com iap.googleapis.com compute.googleapis.com; do
+  for api in aiplatform.googleapis.com run.googleapis.com iap.googleapis.com compute.googleapis.com bigquery.googleapis.com artifactregistry.googleapis.com; do
     if ! gcloud services list --project "${PROJECT_ID}" \
          --enabled --filter="config.name=${api}" \
          --format="value(config.name)" 2>/dev/null | grep -q "${api}"; then
@@ -233,6 +256,84 @@ test_1_5_apis_enabled() {
     fi
   done
   [[ -z "${missing}" ]] || { echo "APIs not enabled: ${missing}"; return 1; }
+}
+
+test_1_6_admin_dashboard_ready() {
+  local state
+  state=$(gcloud run services describe admin-dashboard \
+            --project "${PROJECT_ID}" --region "${CR_REGION}" \
+            --format="value(status.conditions[0].status)" 2>/dev/null || true)
+  if [[ -z "${state}" ]]; then echo "admin-dashboard not deployed"; return 2; fi
+  [[ "${state}" == "True" ]] || { echo "admin-dashboard not ready: ${state}"; return 1; }
+}
+
+test_1_7_bigquery_dataset() {
+  local token status
+  token="$(gcloud auth application-default print-access-token 2>/dev/null)"
+  status=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${token}" \
+            "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/claude_code_logs" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "BigQuery dataset claude_code_logs not found (${status})"; return 1; }
+}
+
+test_1_8_logging_sink() {
+  if ! gcloud logging sinks describe claude-code-gateway-logs \
+       --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "Cloud Logging sink claude-code-gateway-logs not found"
+    return 1
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Layer 4 — Dev portal
+# -----------------------------------------------------------------------------
+test_4_1_portal_health() {
+  [[ -n "${PORTAL_URL}" ]] || return 2
+  local token status
+  token="$(_get_token "${PORTAL_URL}")"
+  status=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${token}" \
+            "${PORTAL_URL%/}/" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "portal returned ${status}"; return 1; }
+}
+
+test_4_2_portal_placeholders_replaced() {
+  [[ -n "${PORTAL_URL}" ]] || return 2
+  local token body
+  token="$(_get_token "${PORTAL_URL}")"
+  body=$(curl -sS -H "Authorization: Bearer ${token}" "${PORTAL_URL%/}/" 2>/dev/null)
+  if echo "${body}" | grep -q '__LLM_GATEWAY_URL__\|__MCP_GATEWAY_URL__\|__PROJECT_ID__\|__REGION__'; then
+    echo "unreplaced placeholders found in portal HTML"
+    return 1
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Layer 6.5 — Observability dashboard
+# -----------------------------------------------------------------------------
+test_6_3_dashboard_health() {
+  [[ -n "${DASHBOARD_URL}" ]] || return 2
+  local token status
+  token="$(_get_token "${DASHBOARD_URL}")"
+  status=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${token}" \
+            "${DASHBOARD_URL%/}/health" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "dashboard /health returned ${status}"; return 1; }
+}
+
+test_6_4_dashboard_api() {
+  [[ -n "${DASHBOARD_URL}" ]] || return 2
+  local token status body
+  token="$(_get_token "${DASHBOARD_URL}")"
+  status=$(curl -sS -o /tmp/e2e_dashboard_api.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${token}" \
+            "${DASHBOARD_URL%/}/api/recent-requests?limit=5" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "dashboard API returned ${status}"; return 1; }
+  body=$(cat /tmp/e2e_dashboard_api.json 2>/dev/null)
+  if ! echo "${body}" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+    echo "dashboard API returned invalid JSON"
+    return 1
+  fi
 }
 
 # -----------------------------------------------------------------------------
@@ -259,7 +360,7 @@ E2E_MARKER="e2e-$(date +%s)-$$"
 test_3_1_gateway_inference() {
   [[ -n "${GATEWAY_URL}" ]] || { echo "no gateway URL"; return 2; }
   local token status
-  token="$(_get_token)"
+  token="$(_get_token "${GATEWAY_URL}")"
   [[ -n "${token}" ]] || { echo "no ADC token"; return 1; }
   # Body carries our unique marker so 3.2 can correlate via the prompt.
   local body
@@ -291,10 +392,25 @@ test_3_2_log_emitted() {
   [[ "${count}" -ge 1 ]] || { echo "no proxy_request log entries found in last 5m"; return 1; }
 }
 
+test_3_2b_gateway_no_v1_path() {
+  [[ -n "${GATEWAY_URL}" ]] || { echo "no gateway URL"; return 2; }
+  local token status
+  token="$(_get_token "${GATEWAY_URL}")"
+  [[ -n "${token}" ]] || { echo "no ADC token"; return 1; }
+  # Claude Code omits the /v1/ prefix when ANTHROPIC_VERTEX_BASE_URL is set.
+  # The gateway must auto-prepend it. This test verifies that path works.
+  local path="/projects/${PROJECT_ID}/locations/${REGION}/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict"
+  status=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL%/}${path}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Content-Type: application/json" \
+            -d "$(_haiku_body)")
+  [[ "${status}" == "200" ]] || { echo "gateway returned ${status} for no-v1 path"; return 1; }
+}
+
 test_3_3_header_sanitization() {
   [[ -n "${GATEWAY_URL}" ]] || return 2
   local token status
-  token="$(_get_token)"
+  token="$(_get_token "${GATEWAY_URL}")"
   local path="/v1/projects/${PROJECT_ID}/locations/${REGION}/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict"
   # Include a bogus anthropic-beta header; if the gateway is stripping
   # correctly the request succeeds. If it forwards, Vertex 4xx's us.
@@ -312,9 +428,10 @@ test_3_3_header_sanitization() {
 test_5_1_mcp_health() {
   [[ -n "${MCP_URL}" ]] || return 2
   local token status
-  token="$(_get_token)"
-  # /health is unauthenticated at the app layer but still gated by
-  # Cloud Run IAM when ingress is internal-only. Send token for safety.
+  token="$(_get_token "${MCP_URL}")"
+  # /health bypasses the token_validation middleware but the token is
+  # still needed — Cloud Run IAM is disabled (--no-invoker-iam-check)
+  # and app-level token validation handles auth for non-health paths.
   status=$(curl -sS -o /dev/null -w "%{http_code}" \
             -H "Authorization: Bearer ${token}" \
             "${MCP_URL%/}/health")
@@ -363,6 +480,69 @@ test_6_2_no_external_ip_on_vm() {
 }
 
 # -----------------------------------------------------------------------------
+# Layer 7 — GLB (only when --glb-url is provided)
+# -----------------------------------------------------------------------------
+test_7_1_glb_health_access_token() {
+  [[ -n "${GLB_URL}" ]] || return 2
+  local token status
+  token="$(gcloud auth application-default print-access-token 2>/dev/null)"
+  [[ -n "${token}" ]] || { echo "no access token"; return 1; }
+  status=$(curl -sSkS -o /dev/null -w "%{http_code}" --connect-timeout 10 \
+            -H "Authorization: Bearer ${token}" \
+            "${GLB_URL%/}/health" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "GLB /health with access token returned ${status}"; return 1; }
+}
+
+test_7_2_glb_inference_access_token() {
+  [[ -n "${GLB_URL}" ]] || return 2
+  local token status
+  token="$(gcloud auth application-default print-access-token 2>/dev/null)"
+  [[ -n "${token}" ]] || { echo "no access token"; return 1; }
+  local path="/v1/projects/${PROJECT_ID}/locations/${REGION}/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict"
+  status=$(curl -sSkS -o /dev/null -w "%{http_code}" -X POST "${GLB_URL%/}${path}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Content-Type: application/json" \
+            -d "$(_haiku_body)" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "GLB inference with access token returned ${status}"; return 1; }
+}
+
+test_7_3_glb_inference_oidc() {
+  [[ -n "${GLB_URL}" ]] || return 2
+  local token status
+  token="$(gcloud auth print-identity-token --audiences="${GLB_URL%/}" 2>/dev/null || true)"
+  [[ -n "${token}" ]] || { echo "no OIDC token"; return 2; }
+  local path="/v1/projects/${PROJECT_ID}/locations/${REGION}/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict"
+  status=$(curl -sSkS -o /dev/null -w "%{http_code}" -X POST "${GLB_URL%/}${path}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Content-Type: application/json" \
+            -d "$(_haiku_body)" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "GLB inference with OIDC token returned ${status}"; return 1; }
+}
+
+test_7_4_direct_cloud_run_blocked() {
+  [[ -n "${GLB_URL}" ]] || return 2
+  [[ -n "${GATEWAY_URL}" ]] || return 2
+  local token status
+  token="$(_get_token "${GATEWAY_URL}")"
+  status=$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 10 \
+            -H "Authorization: Bearer ${token}" \
+            "${GATEWAY_URL%/}/health" 2>/dev/null)
+  if [[ "${status}" == "403" ]]; then return 0; fi
+  echo "direct Cloud Run returned ${status}, expected 403 (ingress should be restricted)"
+  return 1
+}
+
+test_7_5_glb_unauth_rejected() {
+  [[ -n "${GLB_URL}" ]] || return 2
+  local status
+  status=$(curl -sSkS -o /dev/null -w "%{http_code}" --connect-timeout 10 \
+            "${GLB_URL%/}/v1/projects/${PROJECT_ID}/locations/${REGION}/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict" 2>/dev/null)
+  if [[ "${status}" == "401" || "${status}" == "403" ]]; then return 0; fi
+  echo "GLB unauth request returned ${status}, expected 401/403"
+  return 1
+}
+
+# -----------------------------------------------------------------------------
 # Execute
 # -----------------------------------------------------------------------------
 log_step "Layer 1 — Infrastructure"
@@ -373,6 +553,9 @@ if [[ "${QUICK}" == "0" ]]; then
   run_test "1.3 gateway service accounts"    test_1_3_service_accounts
   run_test "1.4 subnet Private Google Access" test_1_4_private_google_access
   run_test "1.5 required APIs enabled"       test_1_5_apis_enabled
+  run_test "1.6 admin dashboard READY"       test_1_6_admin_dashboard_ready
+  run_test "1.7 BigQuery dataset exists"     test_1_7_bigquery_dataset
+  run_test "1.8 Cloud Logging sink exists"   test_1_8_logging_sink
 fi
 
 log_step "Layer 2 — Network path"
@@ -384,7 +567,15 @@ CURRENT_LAYER="Layer 3: Gateway Proxy"
 run_test "3.1 gateway inference"             test_3_1_gateway_inference
 run_test "3.2 structured log emitted"        test_3_2_log_emitted
 if [[ "${QUICK}" == "0" ]]; then
+  run_test "3.2b gateway no-v1 path (Claude Code format)" test_3_2b_gateway_no_v1_path
   run_test "3.3 anthropic-beta stripped"     test_3_3_header_sanitization
+fi
+
+log_step "Layer 4 — Dev portal"
+CURRENT_LAYER="Layer 4: Dev Portal"
+run_test "4.1 portal responds"               test_4_1_portal_health
+if [[ "${QUICK}" == "0" ]]; then
+  run_test "4.2 portal placeholders replaced" test_4_2_portal_placeholders_replaced
 fi
 
 log_step "Layer 5 — MCP gateway"
@@ -395,10 +586,22 @@ if [[ "${QUICK}" == "0" ]]; then
 fi
 
 if [[ "${QUICK}" == "0" ]]; then
-  log_step "Layer 6 — Negative"
-  CURRENT_LAYER="Layer 6: Negative"
+  log_step "Layer 6 — Negative + Observability"
+  CURRENT_LAYER="Layer 6: Negative + Obs"
   run_test "6.1 unauthenticated request rejected" test_6_1_unauth_rejected
   run_test "6.2 dev VM has no external IP"        test_6_2_no_external_ip_on_vm
+  run_test "6.3 dashboard /health responds"       test_6_3_dashboard_health
+  run_test "6.4 dashboard API returns JSON"       test_6_4_dashboard_api
+fi
+
+if [[ -n "${GLB_URL}" ]]; then
+  log_step "Layer 7 — GLB"
+  CURRENT_LAYER="Layer 7: GLB"
+  run_test "7.1 GLB /health (access token)"       test_7_1_glb_health_access_token
+  run_test "7.2 GLB inference (access token)"      test_7_2_glb_inference_access_token
+  run_test "7.3 GLB inference (OIDC token)"        test_7_3_glb_inference_oidc
+  run_test "7.4 direct Cloud Run blocked"          test_7_4_direct_cloud_run_blocked
+  run_test "7.5 GLB unauth rejected"               test_7_5_glb_unauth_rejected
 fi
 
 # -----------------------------------------------------------------------------
@@ -408,7 +611,7 @@ echo "" >&2
 echo "================================================================" >&2
 echo "  E2E Test Results" >&2
 echo "================================================================" >&2
-for layer in "Layer 1: Infrastructure" "Layer 2: Network Path" "Layer 3: Gateway Proxy" "Layer 5: MCP Tools" "Layer 6: Negative"; do
+for layer in "Layer 1: Infrastructure" "Layer 2: Network Path" "Layer 3: Gateway Proxy" "Layer 4: Dev Portal" "Layer 5: MCP Tools" "Layer 6: Negative + Obs" "Layer 7: GLB"; do
   local_pass=${LAYER_PASS[$layer]:-0}
   local_fail=${LAYER_FAIL[$layer]:-0}
   local_skip=${LAYER_SKIP[$layer]:-0}
