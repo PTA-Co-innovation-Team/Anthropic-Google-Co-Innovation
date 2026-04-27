@@ -9,24 +9,33 @@ import sys
 # Add backend to path so we can import the agent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
-# Set required env vars before importing agent
-os.environ["GOOGLE_CLOUD_PROJECT"] = "cpe-slarbi-nvd-ant-demos"
-os.environ["GOOGLE_CLOUD_LOCATION"] = "us-east5"
-os.environ["PROJECT_ID"] = "cpe-slarbi-nvd-ant-demos"
-os.environ["REGION"] = "us-east5"
-os.environ["BQ_DATASET"] = "deal_desk_agent"
-os.environ["MODEL_PROVIDER"] = "claude"
-os.environ["OPUS_MODEL"] = "claude-opus-4-5@20251101"
-os.environ["SONNET_MODEL"] = "claude-sonnet-4-6@default"
-os.environ["HAIKU_MODEL"] = "claude-haiku-4-5@20251001"
+# All deploy-time configuration is read from the environment.
+# Required: GOOGLE_CLOUD_PROJECT (or PROJECT_ID).
+# Optional: GOOGLE_CLOUD_LOCATION/REGION, BQ_DATASET, OPUS_MODEL, SONNET_MODEL,
+#   HAIKU_MODEL, AGENT_ENGINE_LOCATION, STAGING_BUCKET.
+
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("PROJECT_ID")
+if not PROJECT_ID:
+    raise RuntimeError(
+        "Set GOOGLE_CLOUD_PROJECT (or PROJECT_ID) before running this script."
+    )
+
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
+os.environ.setdefault("PROJECT_ID", PROJECT_ID)
+os.environ.setdefault("GOOGLE_CLOUD_LOCATION", os.environ.get("REGION", "us-east5"))
+os.environ.setdefault("REGION", os.environ["GOOGLE_CLOUD_LOCATION"])
+os.environ.setdefault("BQ_DATASET", "deal_desk_agent")
+os.environ.setdefault("MODEL_PROVIDER", "claude")
+os.environ.setdefault("OPUS_MODEL", "claude-opus-4-5@20251101")
+os.environ.setdefault("SONNET_MODEL", "claude-sonnet-4-6@default")
+os.environ.setdefault("HAIKU_MODEL", "claude-haiku-4-5@20251001")
 
 import vertexai
 from vertexai import agent_engines
 from agents import deal_desk_pipeline
 
-PROJECT_ID = "cpe-slarbi-nvd-ant-demos"
-LOCATION = "us-central1"
-STAGING_BUCKET = "gs://cpe-slarbi-nvd-ant-demos-agent-staging"
+LOCATION = os.environ.get("AGENT_ENGINE_LOCATION", "us-central1")
+STAGING_BUCKET = os.environ.get("STAGING_BUCKET", f"gs://{PROJECT_ID}-agent-staging")
 
 print("═" * 60)
 print("  Deal Desk Agent — Agent Engine Deployment")
@@ -75,7 +84,10 @@ remote_agent = client.agent_engines.create(
         "staging_bucket": STAGING_BUCKET,
         "display_name": "Deal Desk Agent",
         "description": "FSI Deal Desk pipeline — Claude on Vertex AI + ADK",
-        "service_account": f"deal-desk-agent-sa@{PROJECT_ID}.iam.gserviceaccount.com",
+        "service_account": os.environ.get(
+            "AGENT_SERVICE_ACCOUNT",
+            f"deal-desk-agent-sa@{PROJECT_ID}.iam.gserviceaccount.com",
+        ),
     },
 )
 
