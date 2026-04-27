@@ -974,13 +974,20 @@ async def chat(request: Request):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/.well-known/agent.json")
-async def a2a_agent_card():
-    """Serve the A2A agent card for discovery."""
+async def a2a_agent_card(request: Request):
+    """Serve the A2A agent card for discovery.
+
+    URL resolution order:
+      1. A2A_AGENT_URL env var (preferred for stable deploys — set this to the
+         public Cloud Run URL when registering the agent with Gemini Enterprise)
+      2. Derived from the incoming request (works on any deploy out of the box)
+    """
+    a2a_url = os.environ.get("A2A_AGENT_URL") or f"{request.url.scheme}://{request.url.netloc}"
     return {
         "protocolVersion": "0.2.3",
         "name": "deal-desk-agent",
         "description": "End-to-end deal desk pipeline for FSI client onboarding. Powered by Claude on Vertex AI + Google ADK.",
-        "url": "https://deal-desk-backend-qrr3gkz3tq-uc.a.run.app",
+        "url": a2a_url,
         "version": "1.0.0",
         "defaultInputModes": ["text"],
         "defaultOutputModes": ["text"],
