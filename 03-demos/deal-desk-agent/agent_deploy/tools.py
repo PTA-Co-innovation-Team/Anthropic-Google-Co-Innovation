@@ -347,8 +347,15 @@ def trigger_salesforce_opportunity(client_name: str) -> dict:
     """
     import httpx
 
-    BACKEND_URL = "https://deal-desk-backend-436293010210.us-central1.run.app"
-    NOVNC_URL = "http://35.223.98.125:6080/vnc.html?autoconnect=true"
+    BACKEND_URL = os.environ.get("BACKEND_URL", "")
+    NOVNC_URL = os.environ.get("NOVNC_URL", "")
+
+    if not BACKEND_URL:
+        return {
+            "success": False,
+            "error": "BACKEND_URL env var is not set on the Agent Engine deployment.",
+            "hint": "Pass BACKEND_URL (Cloud Run backend URL) when deploying to Agent Engine.",
+        }
 
     try:
         resp = httpx.post(
