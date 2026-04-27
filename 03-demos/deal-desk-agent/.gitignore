@@ -1,0 +1,47 @@
+# Secrets — NEVER commit
+.agent-secret
+*.secret
+*.key
+credentials.json
+service-account-*.json
+
+# Env files — commit .env.example instead
+.env
+.env.local
+.env.*.local
+agent_deploy/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# Node / frontend build
+node_modules/
+dist/
+.vite/
+*.log
+npm-debug.log*
+
+# OS / editor / AI tooling
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+*.swp
+*~
+
+# Cloud Build / deploy artifacts
+agent_engine_output.json
+cloudbuild-artifacts/
+
+# Misc
+*.tmp
+.cache/

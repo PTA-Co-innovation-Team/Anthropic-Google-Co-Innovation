@@ -1,0 +1,110 @@
+{
+  "name": "deal-desk-agent",
+  "display_name": "FSI Deal Desk Agent",
+  "description": "End-to-end deal desk pipeline for FSI client onboarding. Runs parallel research and compliance checks, computes risk scoring, synthesizes a deal package, and creates a Salesforce opportunity — all powered by Claude models on Vertex AI, orchestrated by Google ADK.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Google Cloud — Partner Technical Architecture",
+    "contact": "slarbi@google.com"
+  },
+  "url": "https://deal-desk-agent-REGION-run.app",
+  "protocol": "a2a/1.0",
+  "capabilities": {
+    "input": {
+      "type": "text",
+      "description": "Natural language description of a client to onboard, including client name, AUM, strategy, mandate type, fee structure, and primary contact.",
+      "examples": [
+        "Onboard new client: ACME Capital Management. $250M AUM, long/short equity mandate, 2/20 fee structure, institutional investor. Primary contact: Sarah Chen, CIO.",
+        "Run full compliance review for Beacon Hedge Fund. $500M AUM, global macro strategy, Cayman domiciled."
+      ]
+    },
+    "output": {
+      "type": "structured",
+      "description": "A complete deal package containing client profile, compliance determination, risk assessment, deal ID, and Salesforce opportunity ID.",
+      "schema": {
+        "deal_id": "string",
+        "client_name": "string",
+        "aum_millions": "number",
+        "strategy": "string",
+        "mandate_type": "string",
+        "fee_structure": "string",
+        "compliance_status": "string (CLEARED | BLOCKED | CONDITIONAL)",
+        "risk_tier": "string (LOW | MEDIUM | HIGH)",
+        "risk_score": "number (0.0-1.0)",
+        "primary_contact": "string",
+        "primary_contact_title": "string",
+        "salesforce_opportunity_id": "string | null",
+        "status": "string (APPROVED | APPROVED_WITH_CONDITIONS | ON_HOLD | ESCALATED)",
+        "notes": "string"
+      }
+    },
+    "streaming": true,
+    "human_in_the_loop": false
+  },
+  "agents": [
+    {
+      "name": "research_agent",
+      "model": "claude-opus-4-5@20251101",
+      "role": "Client research and market intelligence gathering",
+      "tools": ["query_client_data", "query_market_intelligence"]
+    },
+    {
+      "name": "compliance_agent",
+      "model": "claude-sonnet-4-6@default",
+      "role": "KYC, AML, sanctions, and FINRA compliance verification",
+      "tools": ["query_compliance_records"]
+    },
+    {
+      "name": "risk_agent",
+      "model": "claude-haiku-4-5@20251001",
+      "role": "Quantitative risk scoring and tier assignment",
+      "tools": ["compute_risk_score"]
+    },
+    {
+      "name": "synthesis_agent",
+      "model": "claude-opus-4-5@20251101",
+      "role": "Deal package synthesis and BigQuery logging",
+      "tools": ["insert_deal_package", "update_client_status"]
+    },
+    {
+      "name": "salesforce_agent",
+      "model": "claude-sonnet-4-6@default",
+      "role": "Browser-based Salesforce opportunity creation via computer use",
+      "tools": ["computer_use", "screenshot"]
+    }
+  ],
+  "orchestration": {
+    "pattern": "sequential",
+    "stages": [
+      {
+        "name": "parallel_intake",
+        "type": "parallel",
+        "agents": ["research_agent", "compliance_agent"]
+      },
+      {
+        "name": "risk_assessment",
+        "type": "sequential",
+        "agents": ["risk_agent"]
+      },
+      {
+        "name": "synthesis",
+        "type": "sequential",
+        "agents": ["synthesis_agent"]
+      },
+      {
+        "name": "crm_entry",
+        "type": "sequential",
+        "agents": ["salesforce_agent"]
+      }
+    ]
+  },
+  "infrastructure": {
+    "platform": "Google Cloud",
+    "runtime": "Vertex AI Agent Engine",
+    "model_provider": "Anthropic (Claude on Vertex AI)",
+    "data_services": ["BigQuery", "Cloud SQL"],
+    "deployment": "Cloud Run",
+    "security": ["VPC Service Controls", "Cloud Armor", "IAM"]
+  },
+  "tags": ["fsi", "deal-desk", "onboarding", "compliance", "multi-agent", "computer-use"]
+}
