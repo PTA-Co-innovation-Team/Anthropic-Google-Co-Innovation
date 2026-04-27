@@ -5,8 +5,10 @@ import Markdown from "./Markdown.jsx";
    CONFIG
    ═══════════════════════════════════════════════════════════════════════════════ */
 
-const API_BASE = "https://deal-desk-backend-qrr3gkz3tq-uc.a.run.app";
-const NOVNC_URL = window.NOVNC_URL || "http://localhost:6080/vnc.html?autoconnect=true&resize=scale";
+// Runtime config — injected by nginx entrypoint via /config.js (see Dockerfile).
+// Falls back to localhost defaults so `npm run dev` still works against a local backend.
+const API_BASE = window.__APP_CONFIG__?.API_BASE || "http://localhost:8080";
+const NOVNC_URL = window.__APP_CONFIG__?.NOVNC_URL || "http://localhost:6080/vnc.html?autoconnect=true&resize=scale";
 
 const PRESETS = [
   { label: "New Client Onboarding", prompt: "Onboard new client: ACME Capital Management. $250M AUM, long/short equity mandate, 2/20 fee structure, institutional investor. Primary contact: Sarah Chen, CIO. Run compliance checks and create the Salesforce opportunity." },
