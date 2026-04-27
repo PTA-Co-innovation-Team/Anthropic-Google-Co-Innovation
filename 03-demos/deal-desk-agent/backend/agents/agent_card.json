@@ -7,7 +7,7 @@
     "name": "Google Cloud — Partner Technical Architecture",
     "contact": "slarbi@google.com"
   },
-  "url": "https://deal-desk-agent-REGION-run.app",
+  "url": "set-at-runtime-via-A2A_AGENT_URL-env-var-or-derived-from-request",
   "protocol": "a2a/1.0",
   "capabilities": {
     "input": {
