@@ -31,6 +31,12 @@ resource "google_project_iam_member" "sa_logwriter" {
   member  = "serviceAccount:${google_service_account.sa.email}"
 }
 
+resource "google_project_iam_member" "sa_viewer" {
+  project = var.project_id
+  role    = "roles/iam.serviceAccountViewer"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}
+
 resource "google_cloud_run_v2_service" "gateway" {
   project  = var.project_id
   name     = local.service_name

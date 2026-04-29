@@ -70,9 +70,9 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" \
   wait_for_sa "${SA_EMAIL}"
 fi
 
-# --- SA IAM: Vertex caller + log writer -------------------------------------
-log_step "grant SA roles/aiplatform.user and roles/logging.logWriter"
-for role in roles/aiplatform.user roles/logging.logWriter; do
+# --- SA IAM: Vertex caller + log writer + SA viewer -------------------------
+log_step "grant SA roles"
+for role in roles/aiplatform.user roles/logging.logWriter roles/iam.serviceAccountViewer; do
   run_cmd gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" --role="${role}" --condition=None --quiet
 done

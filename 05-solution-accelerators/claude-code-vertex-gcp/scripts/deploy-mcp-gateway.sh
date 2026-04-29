@@ -57,10 +57,11 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" \
   wait_for_sa "${SA_EMAIL}"
 fi
 
-log_step "grant SA roles/logging.logWriter"
-run_cmd gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-  --member="serviceAccount:${SA_EMAIL}" --role="roles/logging.logWriter" \
-  --condition=None --quiet
+log_step "grant SA roles"
+for role in roles/logging.logWriter roles/iam.serviceAccountViewer; do
+  run_cmd gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${SA_EMAIL}" --role="${role}" --condition=None --quiet
+done
 
 log_step "build + push ${IMAGE}"
 run_cmd gcloud builds submit "${REPO_ROOT}/mcp-gateway" \

@@ -245,12 +245,12 @@ locals {
     managed-by  = "terraform"
   }
 
-  # When dev VM is enabled alongside GLB or VPC-internal mode, the dev
-  # VM's service account must be in ALLOWED_PRINCIPALS so its ADC tokens
-  # pass the app-level token validation middleware.
+  # When the dev VM is enabled, its service account must be in
+  # ALLOWED_PRINCIPALS so its ADC tokens pass the app-level token
+  # validation middleware.
   _dev_vm_sa_principal = "serviceAccount:claude-code-dev-vm@${var.project_id}.iam.gserviceaccount.com"
   gateway_allowed_principals = (
-    (var.enable_glb || var.enable_vpc_internal) && var.enable_dev_vm
+    var.enable_dev_vm
     ? concat(var.allowed_principals, [local._dev_vm_sa_principal])
     : var.allowed_principals
   )
