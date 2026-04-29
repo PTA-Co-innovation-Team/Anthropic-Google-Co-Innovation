@@ -162,7 +162,7 @@ async def requests_per_day(days: int = Query(default=30, ge=1, le=365)):
             COUNT(*) AS count
         FROM {TABLE}
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-            AND JSON_VALUE(jsonPayload, '$.model') IS NOT NULL
+            AND jsonPayload.model IS NOT NULL
         GROUP BY date ORDER BY date
         """,
         [{"name": "days", "type": "INT64", "value": days}],
@@ -178,11 +178,11 @@ async def requests_by_model(days: int = Query(default=30, ge=1, le=365)):
         f"rbm-{days}",
         """
         SELECT
-            JSON_VALUE(jsonPayload, '$.model') AS model,
+            jsonPayload.model AS model,
             COUNT(*) AS count
         FROM {TABLE}
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-            AND JSON_VALUE(jsonPayload, '$.model') IS NOT NULL
+            AND jsonPayload.model IS NOT NULL
         GROUP BY model ORDER BY count DESC
         """,
         [{"name": "days", "type": "INT64", "value": days}],
@@ -201,11 +201,11 @@ async def top_callers(
         f"tc-{days}-{limit}",
         """
         SELECT
-            JSON_VALUE(jsonPayload, '$.caller') AS caller,
+            jsonPayload.caller AS caller,
             COUNT(*) AS count
         FROM {TABLE}
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-            AND JSON_VALUE(jsonPayload, '$.caller') IS NOT NULL
+            AND jsonPayload.caller IS NOT NULL
         GROUP BY caller ORDER BY count DESC
         LIMIT @limit
         """,
@@ -227,10 +227,10 @@ async def error_rate(days: int = Query(default=30, ge=1, le=365)):
         SELECT
             FORMAT_DATE('%Y-%m-%d', DATE(timestamp)) AS date,
             COUNT(*) AS total,
-            COUNTIF(SAFE_CAST(JSON_VALUE(jsonPayload, '$.status_code') AS INT64) >= 400) AS errors
+            COUNTIF(CAST(jsonPayload.status_code AS INT64) >= 400) AS errors
         FROM {TABLE}
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-            AND JSON_VALUE(jsonPayload, '$.status_code') IS NOT NULL
+            AND jsonPayload.status_code IS NOT NULL
         GROUP BY date ORDER BY date
         """,
         [{"name": "days", "type": "INT64", "value": days}],
@@ -251,17 +251,17 @@ async def latency_percentiles(days: int = Query(default=7, ge=1, le=365)):
         """
         SELECT
             APPROX_QUANTILES(
-                SAFE_CAST(JSON_VALUE(jsonPayload, '$.latency_ms_to_headers') AS INT64), 100
+                CAST(jsonPayload.latency_ms_to_headers AS INT64), 100
             )[OFFSET(50)] AS p50,
             APPROX_QUANTILES(
-                SAFE_CAST(JSON_VALUE(jsonPayload, '$.latency_ms_to_headers') AS INT64), 100
+                CAST(jsonPayload.latency_ms_to_headers AS INT64), 100
             )[OFFSET(95)] AS p95,
             APPROX_QUANTILES(
-                SAFE_CAST(JSON_VALUE(jsonPayload, '$.latency_ms_to_headers') AS INT64), 100
+                CAST(jsonPayload.latency_ms_to_headers AS INT64), 100
             )[OFFSET(99)] AS p99
         FROM {TABLE}
         WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-            AND JSON_VALUE(jsonPayload, '$.latency_ms_to_headers') IS NOT NULL
+            AND jsonPayload.latency_ms_to_headers IS NOT NULL
         """,
         [{"name": "days", "type": "INT64", "value": days}],
     )
@@ -277,13 +277,13 @@ async def recent_requests(limit: int = Query(default=50, ge=1, le=200)):
         """
         SELECT
             FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', timestamp) AS timestamp,
-            JSON_VALUE(jsonPayload, '$.caller') AS caller,
-            JSON_VALUE(jsonPayload, '$.model') AS model,
-            SAFE_CAST(JSON_VALUE(jsonPayload, '$.status_code') AS INT64) AS status_code,
-            SAFE_CAST(JSON_VALUE(jsonPayload, '$.latency_ms_to_headers') AS INT64) AS latency_ms,
-            JSON_VALUE(jsonPayload, '$.method') AS method
+            jsonPayload.caller AS caller,
+            jsonPayload.model AS model,
+            CAST(jsonPayload.status_code AS INT64) AS status_code,
+            CAST(jsonPayload.latency_ms_to_headers AS INT64) AS latency_ms,
+            jsonPayload.method AS method
         FROM {TABLE}
-        WHERE JSON_VALUE(jsonPayload, '$.model') IS NOT NULL
+        WHERE jsonPayload.model IS NOT NULL
         ORDER BY timestamp DESC
         LIMIT @limit
         """,

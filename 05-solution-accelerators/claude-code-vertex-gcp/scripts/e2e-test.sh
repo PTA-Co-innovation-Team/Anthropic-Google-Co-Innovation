@@ -119,6 +119,23 @@ log_info "dev portal:  ${PORTAL_URL:-<not deployed>}"
 log_info "dashboard:   ${DASHBOARD_URL:-<not deployed>}"
 log_info "GLB:         ${GLB_URL:-<not configured>}"
 
+# --- Reachability pre-check --------------------------------------------------
+# If the gateway uses internal-only ingress and we're running from outside
+# the VPC, all network tests will fail. Detect early and exit with guidance.
+if [[ -n "${GATEWAY_URL}" ]]; then
+  _probe="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 \
+              "${GATEWAY_URL%/}/healthz" 2>/dev/null || echo "000")"
+  if [[ "${_probe}" == "000" ]]; then
+    log_warn "gateway unreachable at ${GATEWAY_URL}"
+    log_warn "if using VPC-internal ingress:"
+    log_warn "  1. SSH into the dev VM: gcloud compute ssh --tunnel-through-iap claude-code-dev-shared"
+    log_warn "  2. Run this script from the dev VM (it is inside the VPC)"
+    log_warn "  3. Or, if GLB is deployed, pass --gateway-url with the GLB URL"
+    log_warn "No VPN required."
+    exit 2
+  fi
+fi
+
 # -----------------------------------------------------------------------------
 # Test tracking
 # -----------------------------------------------------------------------------
@@ -543,6 +560,49 @@ test_7_5_glb_unauth_rejected() {
 }
 
 # -----------------------------------------------------------------------------
+# Layer 8 — IAP Access Mechanisms
+# -----------------------------------------------------------------------------
+test_8_1_iap_ssh_firewall_rule() {
+  if ! gcloud compute instances describe claude-code-dev-shared \
+       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
+    echo "no dev VM deployed"; return 2
+  fi
+  if ! gcloud compute firewall-rules describe allow-iap-ssh \
+       --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "allow-iap-ssh firewall rule missing — IAP SSH tunneling will fail"
+    return 1
+  fi
+}
+
+test_8_2_iap_tunnel_iam_bindings() {
+  if ! gcloud compute instances describe claude-code-dev-shared \
+       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
+    echo "no dev VM deployed"; return 2
+  fi
+  local bindings
+  bindings=$(gcloud projects get-iam-policy "${PROJECT_ID}" \
+    --flatten="bindings[].members" \
+    --filter="bindings.role=roles/iap.tunnelResourceAccessor" \
+    --format="value(bindings.members)" 2>/dev/null || true)
+  [[ -n "${bindings}" ]] || { echo "no principals with roles/iap.tunnelResourceAccessor"; return 1; }
+}
+
+test_8_3_dev_vm_reaches_gateway() {
+  if ! gcloud compute instances describe claude-code-dev-shared \
+       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
+    echo "no dev VM deployed"; return 2
+  fi
+  [[ -n "${GATEWAY_URL}" ]] || return 2
+  local status
+  status=$(gcloud compute ssh claude-code-dev-shared \
+    --project "${PROJECT_ID}" --zone "${CR_REGION}-a" \
+    --tunnel-through-iap --command \
+    "curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 '${GATEWAY_URL%/}/healthz'" \
+    2>/dev/null || echo "000")
+  [[ "${status}" == "200" ]] || { echo "dev VM cannot reach gateway (status=${status})"; return 1; }
+}
+
+# -----------------------------------------------------------------------------
 # Execute
 # -----------------------------------------------------------------------------
 log_step "Layer 1 — Infrastructure"
@@ -604,6 +664,14 @@ if [[ -n "${GLB_URL}" ]]; then
   run_test "7.5 GLB unauth rejected"               test_7_5_glb_unauth_rejected
 fi
 
+log_step "Layer 8 — IAP Access"
+CURRENT_LAYER="Layer 8: IAP Access"
+run_test "8.1 IAP SSH firewall rule exists"        test_8_1_iap_ssh_firewall_rule
+run_test "8.2 IAP tunnel IAM bindings configured"  test_8_2_iap_tunnel_iam_bindings
+if [[ "${QUICK}" == "0" ]]; then
+  run_test "8.3 dev VM can reach gateway internally" test_8_3_dev_vm_reaches_gateway
+fi
+
 # -----------------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------------
@@ -611,7 +679,7 @@ echo "" >&2
 echo "================================================================" >&2
 echo "  E2E Test Results" >&2
 echo "================================================================" >&2
-for layer in "Layer 1: Infrastructure" "Layer 2: Network Path" "Layer 3: Gateway Proxy" "Layer 4: Dev Portal" "Layer 5: MCP Tools" "Layer 6: Negative + Obs" "Layer 7: GLB"; do
+for layer in "Layer 1: Infrastructure" "Layer 2: Network Path" "Layer 3: Gateway Proxy" "Layer 4: Dev Portal" "Layer 5: MCP Tools" "Layer 6: Negative + Obs" "Layer 7: GLB" "Layer 8: IAP Access"; do
   local_pass=${LAYER_PASS[$layer]:-0}
   local_fail=${LAYER_FAIL[$layer]:-0}
   local_skip=${LAYER_SKIP[$layer]:-0}

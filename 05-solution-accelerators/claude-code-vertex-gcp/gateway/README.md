@@ -127,6 +127,23 @@ provided by the attached service account automatically.
 | `ENABLE_TOKEN_VALIDATION` | Set to `1` to enable app-level token validation middleware. Always enabled in production (`1`). When `0`, middleware is not registered (local dev only). | `1` |
 | `ALLOWED_PRINCIPALS` | Comma-separated emails allowed to call the gateway (e.g. `user@example.com,sa@proj.iam.gserviceaccount.com`). Only checked when token validation is enabled. Empty = any valid Google token accepted. | *(empty)* |
 
+## Deployment settings
+
+The deploy scripts set the Cloud Run service up like this:
+
+| Setting | Standard mode | GLB mode | VPC internal mode | Why |
+| --- | --- | --- | --- | --- |
+| Ingress | `all` | `internal-and-cloud-load-balancing` | `internal` | Standard: laptops reach directly. GLB: only GLB can reach it. VPC internal: only VPC clients can reach it. |
+| Auth | `--no-invoker-iam-check` | *(same)* | *(same)* | Cloud Run IAM disabled; app-level token validation handles auth. |
+| Env: `ENABLE_TOKEN_VALIDATION` | `1` | `1` | `1` | Activates `token_validation.py` middleware (always on). |
+| Env: `ALLOWED_PRINCIPALS` | comma-separated emails | *(same)* | *(same)* | Restricts which Google identities can call the gateway. |
+| VPC Connector | optional | optional | **forced on** | Required for Private Google Access egress in VPC internal mode. |
+| Service account | dedicated SA with `roles/aiplatform.user` + `roles/logging.logWriter` | *(same)* | *(same)* | Least privilege. |
+
+VPC internal mode is mutually exclusive with GLB mode.
+
+---
+
 ## Extending
 
 This gateway is intentionally minimal. Places to extend:

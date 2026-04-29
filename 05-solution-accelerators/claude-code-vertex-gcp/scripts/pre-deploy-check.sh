@@ -385,6 +385,101 @@ check_tls_provider() {
 }
 
 # =============================================================================
+# Check 20: VPC internal ingress — three-way conditional in all deploy scripts
+# =============================================================================
+check_vpc_internal_deploy_scripts() {
+  local missing=""
+  for script in deploy-llm-gateway.sh deploy-mcp-gateway.sh deploy-dev-portal.sh deploy-observability.sh; do
+    if ! grep -q 'ENABLE_VPC_INTERNAL' "${REPO_ROOT}/scripts/${script}" 2>/dev/null; then
+      missing+="${script} "
+    fi
+  done
+  [[ -z "${missing}" ]] || { echo "missing ENABLE_VPC_INTERNAL handling: ${missing}"; return 1; }
+}
+
+# =============================================================================
+# Check 21: VPC internal — Terraform modules have enable_vpc_internal variable
+# =============================================================================
+check_terraform_vpc_internal_vars() {
+  local missing=""
+  for mod in llm_gateway mcp_gateway dev_portal network; do
+    local varfile="${REPO_ROOT}/terraform/modules/${mod}/variables.tf"
+    if ! grep -q 'enable_vpc_internal' "${varfile}" 2>/dev/null; then
+      missing+="${mod} "
+    fi
+  done
+  [[ -z "${missing}" ]] || { echo "missing enable_vpc_internal variable: ${missing}"; return 1; }
+}
+
+# =============================================================================
+# Check 22: VPC internal — reachability pre-checks in developer-facing scripts
+# =============================================================================
+check_vpc_reachability_checks() {
+  local missing=""
+  for script in developer-setup.sh e2e-test.sh seed-demo-data.sh; do
+    if ! grep -q 'healthz\|_probe' "${REPO_ROOT}/scripts/${script}" 2>/dev/null; then
+      missing+="${script} "
+    fi
+  done
+  [[ -z "${missing}" ]] || { echo "missing reachability pre-check: ${missing}"; return 1; }
+}
+
+# =============================================================================
+# Check 23: VPC internal — deploy.sh exports ENABLE_VPC_INTERNAL
+# =============================================================================
+check_deploy_exports_vpc() {
+  local deploy="${REPO_ROOT}/scripts/deploy.sh"
+  if ! grep -q 'export.*ENABLE_VPC_INTERNAL' "${deploy}" 2>/dev/null; then
+    echo "deploy.sh does not export ENABLE_VPC_INTERNAL"
+    return 1
+  fi
+  if ! grep -q 'ENABLE_GLB.*ENABLE_VPC_INTERNAL.*mutually exclusive' "${deploy}" 2>/dev/null; then
+    echo "deploy.sh missing mutual exclusion guard"
+    return 1
+  fi
+}
+
+# =============================================================================
+# Check 25: IAP access model — deploy.sh does NOT say "requires VPN"
+# =============================================================================
+check_no_vpn_in_prompts() {
+  local deploy="${REPO_ROOT}/scripts/deploy.sh"
+  if grep -q 'requires VPN' "${deploy}" 2>/dev/null; then
+    echo "deploy.sh still mentions 'requires VPN' in interactive prompts"
+    return 1
+  fi
+}
+
+# =============================================================================
+# Check 26: Developer-facing scripts guide toward IAP, not VPN
+# =============================================================================
+check_iap_guidance_not_vpn() {
+  local issues=""
+  for script in developer-setup.sh e2e-test.sh seed-demo-data.sh; do
+    local path="${REPO_ROOT}/scripts/${script}"
+    if grep -q 'must be on.*VPN\|network / VPN' "${path}" 2>/dev/null; then
+      issues+="${script} "
+    fi
+  done
+  [[ -z "${issues}" ]] || { echo "scripts still guide toward VPN: ${issues}"; return 1; }
+}
+
+# =============================================================================
+# Check 27: IAP firewall rules defined in network module
+# =============================================================================
+check_iap_firewall_rules() {
+  local netmain="${REPO_ROOT}/terraform/modules/network/main.tf"
+  local missing=""
+  if ! grep -q 'allow_iap_ssh' "${netmain}" 2>/dev/null; then
+    missing+="allow-iap-ssh "
+  fi
+  if ! grep -q 'allow_iap_web' "${netmain}" 2>/dev/null; then
+    missing+="allow-iap-web "
+  fi
+  [[ -z "${missing}" ]] || { echo "missing IAP firewall rules: ${missing}"; return 1; }
+}
+
+# =============================================================================
 # Run all checks
 # =============================================================================
 log_step "Pre-deploy code consistency checks"
@@ -421,8 +516,21 @@ _check "17. GLB module admin_dashboard wired" check_glb_admin_dashboard_var
 _check "18. versions.tf has tls provider" check_tls_provider
 
 echo "" >&2
+log_info "--- VPC Internal Ingress ---"
+_check "20. Deploy scripts have VPC internal conditionals" check_vpc_internal_deploy_scripts
+_check "21. Terraform modules have enable_vpc_internal" check_terraform_vpc_internal_vars
+_check "22. Reachability pre-checks in user scripts" check_vpc_reachability_checks
+_check "23. deploy.sh exports + guards VPC internal" check_deploy_exports_vpc
+
+echo "" >&2
+log_info "--- IAP Access Model ---"
+_check "25. deploy.sh prompts do not mention VPN" check_no_vpn_in_prompts
+_check "26. Developer scripts guide toward IAP" check_iap_guidance_not_vpn
+_check "27. IAP firewall rules in network module" check_iap_firewall_rules
+
+echo "" >&2
 log_info "--- Teardown Coverage ---"
-_check "19. Teardown handles all GLB resources" check_teardown_glb
+_check "28. Teardown handles all GLB resources" check_teardown_glb
 
 # --- Summary ---------------------------------------------------------------
 echo "" >&2

@@ -137,6 +137,10 @@ def build_document():
     # ===== TABLE OF CONTENTS =====
     doc.add_heading("Table of Contents", level=1)
     toc_items = [
+        ("", "Introduction and Background"),
+        ("", "What You'll Get"),
+        ("", "Deployment Modes"),
+        ("", "Prerequisites and Deployment Paths"),
         ("1", "The Orchestrator: deploy.sh"),
         ("2", "The Core Gateway: deploy-llm-gateway.sh"),
         ("3", "Shared MCP Tools: deploy-mcp-gateway.sh"),
@@ -147,12 +151,217 @@ def build_document():
         ("8", "MCP Gateway Runtime"),
         ("9", "Populating the Dashboard: seed-demo-data.sh"),
         ("10", "Viewing the Admin Dashboard"),
+        ("11", "Access Tiers and Security Model"),
+        ("12", "Validation and Regression Testing"),
         ("A", "Complete Lifecycle Diagram"),
     ]
     for num, title in toc_items:
         p = doc.add_paragraph()
-        run = p.add_run(f"  {num}.  {title}")
+        label = f"  {num}.  {title}" if num else f"  {title}"
+        run = p.add_run(label)
         run.font.size = Pt(11)
+    doc.add_page_break()
+
+    # =================================================================
+    # INTRODUCTION AND BACKGROUND
+    # =================================================================
+    doc.add_heading("Introduction and Background", level=1)
+
+    doc.add_paragraph(
+        "This document is a full deployment and operations walkthrough for "
+        "Claude Code on GCP via Vertex AI — a production-quality reference "
+        "architecture and deployment kit for running Claude Code on Google "
+        "Cloud with all model inference routed through Vertex AI."
+    )
+    doc.add_paragraph(
+        "No traffic to api.anthropic.com. Google identity everywhere. "
+        "Near-zero cost when idle. Built for teams whose security reviewers "
+        "will actually read the diagram."
+    )
+
+    doc.add_heading("Disclaimer", level=2)
+    doc.add_paragraph(
+        "This repository is a reference architecture, not a supported product "
+        "of Google LLC, Anthropic PBC, or any affiliated entity. It is released "
+        "under Apache 2.0 and is provided strictly as-is, with no warranty of "
+        "any kind, express or implied."
+    )
+    doc.add_paragraph(
+        "You are responsible for reviewing, adapting, and testing every component "
+        "before running it against a production Google Cloud project. The "
+        "operational, security, compliance, and cost consequences of any "
+        "deployment are yours to evaluate and own."
+    )
+    p = doc.add_paragraph()
+    run = p.add_run("Use at your own risk — this is a map, not the territory.")
+    run.bold = True
+
+    # =================================================================
+    # WHAT YOU'LL GET
+    # =================================================================
+    doc.add_heading("What You'll Get", level=1)
+
+    doc.add_paragraph(
+        "When deployment completes, your GCP project will contain the "
+        "following components:"
+    )
+    add_table(doc,
+        ["Component", "What It Is", "Why It Exists"],
+        [
+            ["LLM Gateway", "Cloud Run service — tiny FastAPI reverse proxy",
+             "Single point for auth, logging, and header sanitation in front of Vertex AI"],
+            ["MCP Gateway", "Cloud Run service — FastMCP over Streamable HTTP",
+             "Place to host your organization's custom MCP tools"],
+            ["Dev Portal", "Cloud Run static site",
+             "Self-service setup instructions for developers (IAP-protected in GLB mode, Cloud Run IAM in standard mode)"],
+            ["Dev VM (optional)", "GCE VM with VS Code Server, accessed via IAP",
+             "Cloud dev environment for teams that don't want local installs"],
+            ["Observability", "Log sink to BigQuery + built-in admin dashboard",
+             "Admin dashboard: who is using Claude, how much, errors, top models"],
+        ],
+    )
+
+    doc.add_paragraph("")
+    doc.add_heading("Authentication Model", level=2)
+    doc.add_paragraph(
+        "In standard mode, the LLM and MCP gateways use app-level token "
+        "validation (token_validation.py middleware) that accepts both OAuth2 "
+        "access tokens and OIDC identity tokens. Cloud Run's built-in invoker "
+        "IAM check is disabled (--no-invoker-iam-check) because Claude Code "
+        "sends access tokens, which Cloud Run IAM rejects. An ALLOWED_PRINCIPALS "
+        "allowlist controls who can call the gateways."
+    )
+
+    # =================================================================
+    # DEPLOYMENT MODES
+    # =================================================================
+    doc.add_heading("Deployment Modes", level=1)
+
+    doc.add_paragraph(
+        "The deployment kit supports three mutually exclusive ingress modes. "
+        "Each mode is a single deploy.sh prompt — no manual Cloud Run "
+        "configuration needed."
+    )
+
+    doc.add_heading("Standard Mode (default)", level=2)
+    doc.add_paragraph(
+        "Cloud Run services use --ingress all so developer laptops can reach "
+        "them directly. The token_validation.py middleware is the security "
+        "boundary. This is the simplest mode and suitable for initial "
+        "deployments and small teams."
+    )
+
+    doc.add_heading("GLB Mode (optional)", level=2)
+    doc.add_paragraph(
+        "A Global HTTP(S) Load Balancer sits in front of all services. "
+        "Ingress is internal-and-cloud-load-balancing; the GLB is the only "
+        "entry point. Gateways use the same app-level token validation as "
+        "standard mode; portal and dashboard use IAP for browser auth. "
+        "Requires a DNS domain for managed certificates."
+    )
+    add_diagram(doc,
+        "Developer laptop --(HTTPS + access token)--> GLB --> Cloud Run (internal + GLB)\n"
+        "                 --(browser + IAP SSO)------> GLB --> Cloud Run (IAP-protected)"
+    )
+
+    doc.add_heading("VPC Internal Mode (optional, mutually exclusive with GLB)", level=2)
+    doc.add_paragraph(
+        "All Cloud Run services use --ingress internal — they are only "
+        "reachable from within the VPC. Developers access services through "
+        "the dev VM, which is inside the VPC and accessed via IAP SSH "
+        "tunneling (gcloud compute ssh --tunnel-through-iap). No VPN is "
+        "required — IAP provides secure access."
+    )
+    add_diagram(doc,
+        "Developer laptop --(IAP SSH tunnel)--> Dev VM (inside VPC) --> Cloud Run (internal)"
+    )
+    doc.add_paragraph(
+        "When VPC-internal mode is selected, deploy.sh recommends enabling "
+        "the dev VM since it is the primary access path. developer-setup.sh "
+        "detects unreachable services and skips the smoke test with IAP-based "
+        "remediation guidance."
+    )
+
+    doc.add_heading("Access Tiers (IAP-based, no VPN required)", level=2)
+    doc.add_paragraph(
+        "Both restricted-ingress modes use IAP as the access mechanism:"
+    )
+    add_table(doc,
+        ["Tier", "Mode", "Access Path", "Best For"],
+        [
+            ["Tier 1", "GLB + IAP",
+             "GLB fronts all services. IAP for browsers, token validation for APIs.",
+             "Production deployments with custom domains"],
+            ["Tier 2", "Dev VM + IAP SSH",
+             "No GLB. Cloud Run uses --ingress internal. SSH to dev VM via IAP.",
+             "Development/budget deployments"],
+        ],
+    )
+
+    # =================================================================
+    # PREREQUISITES AND DEPLOYMENT PATHS
+    # =================================================================
+    doc.add_page_break()
+    doc.add_heading("Prerequisites and Deployment Paths", level=1)
+
+    doc.add_heading("Prerequisites", level=2)
+    doc.add_paragraph("Before you deploy, you need:")
+    prereqs = [
+        "A Google Cloud project where you have the Owner or Editor role.",
+        "A billing account linked to that project. Running this costs roughly "
+        "$0-5/month when idle.",
+        "Access to the Anthropic Claude models on Vertex AI. Open the Vertex "
+        "AI Model Garden, search for Claude, and enable the models you want "
+        "(Opus 4.6, Sonnet 4.6, Haiku 4.5 are defaults).",
+        "A local machine with gcloud CLI installed and logged in, and git installed. "
+        "For the Terraform path: terraform >= 1.6. For the notebook path: just a browser.",
+    ]
+    for item in prereqs:
+        doc.add_paragraph(item, style="List Bullet")
+
+    doc.add_heading("Four Ways to Deploy", level=2)
+    doc.add_paragraph(
+        "Pick whichever matches your comfort level. All four end up with the "
+        "same resources."
+    )
+
+    add_table(doc,
+        ["Path", "Method", "Best For"],
+        [
+            ["1. curl-to-bash",
+             "curl -fsSL <deploy-url> | bash",
+             "Fastest way to kick the tires; script clones repo into a temp dir"],
+            ["2. Git clone + script (recommended)",
+             "git clone <repo> && cd scripts && ./deploy.sh",
+             "Keep a local copy you can inspect, modify, and re-run"],
+            ["3. Terraform",
+             "terraform init && terraform apply (two-phase)",
+             "Teams that already use IaC; TF modules mirror config.yaml toggles"],
+            ["4. Notebook (Colab / Vertex Workbench)",
+             "Open deploy.ipynb and step through cells",
+             "See each step and its output without installing anything locally"],
+        ],
+    )
+
+    doc.add_heading("Cost Summary", level=2)
+    doc.add_paragraph(
+        "Idle is the common case. Typical monthly costs:"
+    )
+    add_table(doc,
+        ["Configuration", "Estimated Cost"],
+        [
+            ["Default, idle (LLM + MCP + portal, no dev VM)", "~$0-5/month"],
+            ["Default, light use (a few developers)", "~$10-30/month (Vertex tokens dominate)"],
+            ["Everything on (incl. dev VM e2-small, BigQuery sink)", "~$25-50/month"],
+            ["+ GLB (add to any config)", "+~$18/month"],
+            ["+ VPC internal (add to any non-GLB config)", "+~$0 (VPC Connector is forced on)"],
+        ],
+    )
+    doc.add_paragraph(
+        "Token costs for Claude on Vertex follow Google's published Vertex AI "
+        "pricing — they are billed to your GCP project, not to Anthropic."
+    )
+
     doc.add_page_break()
 
     # =================================================================
@@ -195,6 +404,7 @@ def build_document():
             ["Deploy dev VM?", "no", "Optional cloud development environment"],
             ["Install observability?", "yes", "BigQuery log sink and admin dashboard"],
             ["Deploy GLB?", "no", "Global Load Balancer for custom domains, IAP, Cloud Armor"],
+            ["Restrict to VPC-internal?", "no (only if GLB=no)", "Cloud Run uses --ingress internal; developers access via IAP"],
             ["Allowed principals", "Current gcloud account", "Comma-separated user: and group: entries"],
         ],
     )
@@ -207,11 +417,22 @@ def build_document():
         "and GLB are both enabled)."
     )
 
+    doc.add_paragraph(
+        "If VPC-internal is enabled (mutually exclusive with GLB), the script "
+        "displays guidance explaining that developers access services through the "
+        "dev VM via IAP SSH tunneling — no VPN is required. If the dev VM was not "
+        "already selected, the script recommends enabling it, since the dev VM is "
+        "the primary access path in VPC-internal mode."
+    )
+
     doc.add_heading("1.3 Config File and Confirmation Gate", level=2)
     doc.add_paragraph(
-        "All answers are written to config.yaml at the repository root. The file is "
-        "displayed to the user, and the script asks: \"Proceed with this configuration?\" "
-        "If declined, the config file is preserved for manual editing and the script exits."
+        "All answers are written to config.yaml at the repository root. The file "
+        "includes project ID, region, component toggles, GLB settings, a vpc section "
+        "(with internal_ingress flag), the allowed principals list, and pinned model "
+        "versions. The file is displayed to the user, and the script asks: "
+        "\"Proceed with this configuration?\" If declined, the config file is "
+        "preserved for manual editing and the script exits."
     )
 
     doc.add_heading("1.4 GCP Setup", level=2)
@@ -226,24 +447,29 @@ def build_document():
 
     doc.add_heading("1.5 Component Deployment Order", level=2)
     doc.add_paragraph(
-        "Components are deployed conditionally, in a specific order:"
+        "Before deploying, the script validates mutual exclusion: GLB and "
+        "VPC-internal cannot both be enabled. Components are then deployed "
+        "conditionally, in a specific order:"
     )
 
     add_diagram(doc, """\
 deploy.sh
+  |-- Validate: GLB and VPC-internal are mutually exclusive
   |-- deploy-llm-gateway.sh      (always first; other components reference its URL)
   |-- deploy-mcp-gateway.sh
   |-- deploy-dev-portal.sh        (substitutes gateway URLs into HTML)
   |-- deploy-observability.sh     (BigQuery dataset + log sink + dashboard)
-  |-- deploy-glb.sh               (optional)
+  |-- deploy-glb.sh               (optional, mutually exclusive with VPC-internal)
   |     +-- deploy-dev-portal.sh  (re-deployed to inject GLB URLs)
-  +-- deploy-dev-vm.sh            (optional; always last)""")
+  +-- deploy-dev-vm.sh            (optional; always last; recommended for VPC-internal)""")
 
     doc.add_paragraph("")
     doc.add_paragraph(
         "The portal is intentionally deployed twice when GLB is enabled: first with "
         "Cloud Run URLs (so it exists for the GLB to reference), then again with GLB "
-        "URLs (so developers see the correct endpoint)."
+        "URLs (so developers see the correct endpoint). All deploy scripts use "
+        "a three-way ingress conditional (standard / GLB / VPC-internal) to set "
+        "the correct --ingress flag on each Cloud Run service."
     )
 
     doc.add_page_break()
@@ -354,12 +580,24 @@ gcloud run deploy llm-gateway \\
     )
 
     doc.add_heading("2.6 Ingress Mode", level=2)
+    doc.add_paragraph(
+        "Each deploy script contains a three-way conditional that selects the "
+        "ingress flag based on the deployment mode:"
+    )
     add_table(doc,
         ["Mode", "Ingress Flag", "Behavior"],
         [
             ["Standard", "--ingress all", "Developer laptops reach the service directly; token validation is the security boundary"],
             ["GLB", "--ingress internal-and-cloud-load-balancing", "Only the GLB can reach the service; external direct access is blocked"],
+            ["VPC-internal", "--ingress internal", "Only VPC traffic can reach the service; developers access via dev VM + IAP SSH"],
         ],
+    )
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "GLB and VPC-internal modes are mutually exclusive. In VPC-internal mode, "
+        "the VPC Connector is forced on so Cloud Run egress routes through the VPC "
+        "for Private Google Access. No VPN is required — IAP provides secure "
+        "developer access."
     )
 
     doc.add_page_break()
@@ -725,19 +963,40 @@ GLB domain (env var GLB_DOMAIN)
         ],
     )
 
-    doc.add_heading("7.6 Smoke Test", level=2)
+    doc.add_heading("7.6 Reachability Pre-Check and Smoke Test", level=2)
     doc.add_paragraph(
-        "After writing settings, the script tests the gateway connection by sending "
-        "an ADC access token to the /health endpoint. This matches what Claude Code "
-        "actually sends (access tokens, not identity tokens). Results:"
+        "Before the authenticated smoke test, the script probes the gateway's "
+        "/healthz endpoint with a 5-second timeout. If the probe returns 000 "
+        "(connection failure), the script recognizes the service likely uses "
+        "internal-only ingress and skips the smoke test gracefully. It displays "
+        "two IAP-based remediation options:"
+    )
+    items = [
+        "If a GLB is deployed, re-run with the GLB URL (auto-discovered if available).",
+        "SSH into the dev VM via IAP and run Claude Code from there.",
+    ]
+    for item in items:
+        doc.add_paragraph(item, style="List Number")
+
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "If the gateway is reachable, the script sends an ADC access token to "
+        "/health — the same token type Claude Code sends. Results:"
     )
     add_table(doc,
         ["Status", "Meaning"],
         [
-            ["200", "Gateway is reachable and auth works"],
-            ["401/403", "Permission issue (identity not in ALLOWED_PRINCIPALS)"],
-            ["000", "Network unreachable"],
+            ["200", "Smoke test passed — gateway is reachable and auth works"],
+            ["401/403", "Identity may not be in the gateway's ALLOWED_PRINCIPALS list"],
+            ["000", "Service uses internal-only ingress — access via GLB or dev VM"],
         ],
+    )
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "The script always exits 0 regardless of the smoke test result — the test "
+        "is informational only. The final output prints \"setup complete\" with "
+        "a clear summary: settings file path, smoke test status, and the command "
+        "to start Claude Code."
     )
 
     doc.add_page_break()
@@ -815,11 +1074,20 @@ GLB domain (env var GLB_DOMAIN)
         ],
     )
 
-    doc.add_heading("9.3 Request Execution", level=2)
+    doc.add_heading("9.3 Reachability Pre-Check", level=2)
+    doc.add_paragraph(
+        "Before sending any requests, the script probes the gateway's /healthz "
+        "endpoint. If the probe returns 000 (connection failure), the script "
+        "exits with an error and prints IAP SSH guidance: developers should SSH "
+        "into the dev VM via IAP and run the script from there. This prevents "
+        "wasting time on requests that will all fail in VPC-internal mode."
+    )
+
+    doc.add_heading("9.4 Request Execution", level=2)
     doc.add_paragraph(
         "The script cycles through a corpus of 20 developer-focused prompts "
-        "(e.g. \"Reply with the single word: ok\", \"What is 2+2?\", \"Name one "
-        "GCP service\"). Requests are spread evenly across the configured duration. "
+        "(e.g. \"Refactor this function\", \"Explain this regex\", \"Write a "
+        "unit test\"). Requests are spread evenly across the configured duration. "
         "Sleep between requests = duration_seconds / total_requests."
     )
     add_code_block(doc, """\
@@ -913,6 +1181,140 @@ echo "${DASHBOARD_URL}"  # Open in browser""")
     doc.add_page_break()
 
     # =================================================================
+    # STAGE 11
+    # =================================================================
+    doc.add_heading("11. Access Tiers and Security Model", level=1)
+    doc.add_paragraph(
+        "The solution provides two IAP-based access tiers for restricted-ingress "
+        "deployments. No VPN infrastructure is required — IAP handles secure "
+        "developer access in both tiers."
+    )
+
+    doc.add_heading("11.1 Tier 1: GLB + IAP (Production)", level=2)
+    doc.add_paragraph(
+        "A Global HTTP(S) Load Balancer fronts all Cloud Run services. Cloud Run "
+        "uses --ingress internal-and-cloud-load-balancing, meaning only the GLB "
+        "can reach the services. Browser services (dev portal, admin dashboard) "
+        "are protected by IAP, which handles Google SSO authentication. API services "
+        "(llm-gateway, mcp-gateway) use app-level token validation — IAP is not "
+        "applied to API backends because Claude Code sends Bearer tokens, not "
+        "browser cookies."
+    )
+    add_diagram(doc, """\
+Developer laptop
+  |-- (HTTPS + access token) --> GLB --> llm-gateway (token_validation)
+  |-- (HTTPS + access token) --> GLB --> mcp-gateway (token_validation)
+  |-- (browser + IAP SSO)    --> GLB --> dev-portal  (IAP-protected)
+  +-- (browser + IAP SSO)    --> GLB --> dashboard   (IAP-protected)""")
+
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "Requires a DNS domain for managed certificates. Self-signed certificates "
+        "work with IP-only access but require NODE_TLS_REJECT_UNAUTHORIZED=0 in "
+        "each developer's settings.json (set automatically by developer-setup.sh)."
+    )
+
+    doc.add_heading("11.2 Tier 2: Dev VM + IAP SSH (Development / Budget)", level=2)
+    doc.add_paragraph(
+        "No GLB needed. Cloud Run uses --ingress internal. Developers SSH into "
+        "the dev VM via IAP TCP tunneling and run Claude Code directly from the "
+        "VM. The dev VM is pre-configured with Claude Code, ADC credentials, and "
+        "gateway URLs pointing at the internal Cloud Run services."
+    )
+    add_diagram(doc, """\
+Developer laptop
+  |-- gcloud compute ssh --tunnel-through-iap claude-code-dev-shared
+  |
+  +-- Dev VM (inside VPC)
+        |-- claude (Claude Code CLI, pre-installed)
+        |-- settings.json points at internal Cloud Run URLs
+        +-- Reaches llm-gateway, mcp-gateway directly (same VPC)""")
+
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "The dev VM has no public IP and is accessed exclusively via IAP. OS Login "
+        "is enabled, so developers authenticate with their own Google identities. "
+        "For developers who prefer their local editor, SSH port forwarding provides "
+        "access to internal services:"
+    )
+    add_code_block(doc, """\
+gcloud compute ssh claude-code-dev-shared --tunnel-through-iap \\
+  --project=$PROJECT_ID --zone=$ZONE \\
+  -- -L 8443:llm-gateway-abc123-uc.a.run.app:443""")
+
+    doc.add_heading("11.3 Security Boundaries", level=2)
+    add_table(doc,
+        ["Layer", "Standard Mode", "GLB Mode (Tier 1)", "VPC-Internal (Tier 2)"],
+        [
+            ["Network ingress", "Public (--ingress all)", "GLB only", "VPC only"],
+            ["API auth", "token_validation.py", "token_validation.py", "token_validation.py"],
+            ["Browser auth", "Cloud Run IAM", "IAP (Google SSO)", "N/A (use dev VM)"],
+            ["Developer access", "Direct from laptop", "Via GLB domain", "Via dev VM + IAP SSH"],
+            ["VPN required?", "No", "No", "No"],
+        ],
+    )
+
+    doc.add_page_break()
+
+    # =================================================================
+    # STAGE 12
+    # =================================================================
+    doc.add_heading("12. Validation and Regression Testing", level=1)
+
+    doc.add_heading("12.1 Pre-Deploy Checks: pre-deploy-check.sh", level=2)
+    doc.add_paragraph(
+        "A local code consistency validator that runs without GCP access. It "
+        "validates cross-file parity across deploy scripts, Terraform modules, "
+        "and application code. Currently runs 27 checks across six categories:"
+    )
+    add_table(doc,
+        ["Category", "Checks", "What It Validates"],
+        [
+            ["Unit Tests", "1", "Gateway pytest suite passes"],
+            ["Token Validation", "4", "Middleware in sync, registered conditionally, caller fallback, Dockerfile"],
+            ["Deploy Script GLB", "7", "GLB conditionals, dev VM SA, orchestration order, certs, DNS, IAP"],
+            ["Terraform Consistency", "6", "enable_glb vars, gateway_allowed_principals, backends, IAP, TLS"],
+            ["VPC Internal Ingress", "4", "Three-way conditionals, enable_vpc_internal vars, reachability checks, exports"],
+            ["IAP Access Model", "3", "No VPN in prompts, IAP guidance in scripts, IAP firewall rules"],
+            ["Teardown Coverage", "1", "All GLB resources handled"],
+        ],
+    )
+
+    doc.add_heading("12.2 End-to-End Tests: e2e-test.sh", level=2)
+    doc.add_paragraph(
+        "An 8-layer test suite that validates the full deployment from "
+        "infrastructure through IAP access. Tests return PASS (0), FAIL (1), "
+        "or SKIP (2, when a component is not deployed)."
+    )
+    add_table(doc,
+        ["Layer", "Focus", "Example Tests"],
+        [
+            ["1. Infrastructure", "Cloud Run services, IP addresses", "Services in READY state, no public IPs"],
+            ["2. Network Path", "Connectivity, auth", "Gateway /health, TLS, access token auth"],
+            ["3. Gateway Proxy", "Inference, streaming", "Haiku inference, response streaming"],
+            ["4. Dev Portal", "Static site", "Portal serves HTML, contains gateway URLs"],
+            ["5. MCP Tools", "MCP protocol", "Tool list, tool invocation (gcp_project_info)"],
+            ["6. Negative + Obs", "Security, dashboard", "Unauth rejected, dashboard health"],
+            ["7. GLB", "Load balancer", "GLB health, inference, direct-run-blocked, unauth"],
+            ["8. IAP Access", "IAP mechanisms", "SSH firewall rule, IAM bindings, dev VM reachability"],
+        ],
+    )
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "Layer 8 (IAP Access) was added to validate the IAP-based access model. "
+        "Test 8.3 (dev VM reaches gateway internally) SSHs into the dev VM via "
+        "IAP and curls the gateway from inside the VPC — confirming the full "
+        "Tier 2 access path works end-to-end."
+    )
+    doc.add_paragraph(
+        "If the gateway is unreachable (VPC-internal mode from outside the VPC), "
+        "the script exits with code 2 and prints IAP SSH guidance instead of "
+        "failing silently."
+    )
+
+    doc.add_page_break()
+
+    # =================================================================
     # APPENDIX
     # =================================================================
     doc.add_heading("Appendix A: Complete Lifecycle Diagram", level=1)
@@ -924,24 +1326,28 @@ echo "${DASHBOARD_URL}"  # Open in browser""")
     add_diagram(doc, """\
 deploy.sh
   |
-  |-- Prompts --> config.yaml
+  |-- Prompts --> config.yaml (incl. vpc: internal_ingress flag)
+  |-- Validates: GLB and VPC-internal are mutually exclusive
   |-- Enables APIs
   |
   |-- deploy-llm-gateway.sh
   |     |-- Create SA (llm-gateway)
   |     |-- Grant roles/aiplatform.user + roles/logging.logWriter
   |     |-- Docker build (multi-stage, ~120MB)
+  |     |-- Three-way ingress: standard / GLB / VPC-internal
   |     +-- Cloud Run deploy (--no-invoker-iam-check, ENABLE_TOKEN_VALIDATION=1)
   |
-  |-- deploy-mcp-gateway.sh  (same shape, different SA roles)
-  |-- deploy-dev-portal.sh   (nginx, placeholder substitution)
+  |-- deploy-mcp-gateway.sh  (same shape, same three-way ingress)
+  |-- deploy-dev-portal.sh   (nginx, placeholder substitution, three-way ingress)
   |
   |-- deploy-observability.sh
   |     |-- BigQuery dataset (claude_code_logs)
   |     |-- Log sink (service_name = llm-gateway | mcp-gateway)
-  |     +-- Admin dashboard (Cloud Run, Chart.js, 6 panels)
+  |     +-- Admin dashboard (Cloud Run, Chart.js, 6 panels, three-way ingress)
   |
-  +-- (optional) deploy-glb.sh, deploy-dev-vm.sh""")
+  |-- (optional) deploy-glb.sh   (mutually exclusive with VPC-internal)
+  |     +-- deploy-dev-portal.sh (re-deployed to inject GLB URLs)
+  +-- (optional) deploy-dev-vm.sh (recommended for VPC-internal; always last)""")
 
     doc.add_paragraph("")
 
@@ -949,9 +1355,26 @@ deploy.sh
 developer-setup.sh (per developer laptop)
   |-- gcloud auth application-default login
   |-- npm install -g @anthropic-ai/claude-code
-  |-- Auto-discover gateway URLs
+  |-- Auto-discover gateway URLs (GLB -> Cloud Run fallback chain)
   |-- Write ~/.claude/settings.json
-  +-- Smoke test /health""")
+  |-- Reachability pre-check (/healthz, 5s timeout)
+  |     |-- Reachable:  authenticated smoke test (/health with ADC token)
+  |     +-- Unreachable: skip test, print IAP SSH guidance (no VPN needed)
+  +-- "setup complete" — start Claude Code with: claude""")
+
+    doc.add_paragraph("")
+
+    add_diagram(doc, """\
+Access Tiers (both IAP-based, no VPN required)
+  |
+  |-- Tier 1: GLB + IAP (production)
+  |     |-- Laptop --> GLB --> Cloud Run (internal-and-cloud-load-balancing)
+  |     |-- Browser services: IAP (Google SSO)
+  |     +-- API services: token_validation middleware
+  |
+  +-- Tier 2: Dev VM + IAP SSH (development / budget)
+        |-- Laptop --> IAP SSH --> Dev VM (inside VPC)
+        +-- Dev VM --> Cloud Run (internal) directly""")
 
     doc.add_paragraph("")
 
@@ -970,6 +1393,7 @@ claude (developer runs Claude Code)
 
     add_diagram(doc, """\
 seed-demo-data.sh
+  |-- Reachability pre-check (exit with IAP SSH guidance if unreachable)
   |-- 50 tiny Haiku requests (~$0.005 total)
   |-- Spread over 30 minutes
   +-- Populates all 6 dashboard panels""")

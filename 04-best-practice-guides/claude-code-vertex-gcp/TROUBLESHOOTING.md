@@ -24,6 +24,10 @@ an issue with the full error text and the output of
   - [HTTP 429: quota exceeded](#http-429-quota-exceeded)
   - ["Model not available in region"](#model-not-available-in-region)
   - [Gateway returns 502 upstream_unavailable](#gateway-returns-502-upstream_unavailable)
+- [VPC internal mode issues](#vpc-internal-mode-issues)
+  - [Connection timeout when calling gateway (VPC internal)](#connection-timeout-when-calling-gateway-vpc-internal)
+  - [developer-setup.sh smoke test shows 000](#developer-setupsh-smoke-test-shows-000)
+  - [e2e-test.sh exits with code 2](#e2e-testsh-exits-with-code-2)
 - [GLB-specific issues](#glb-specific-issues)
   - [GLB returns 404 for all requests](#glb-returns-404-for-all-requests)
   - [SSL certificate stuck in PROVISIONING](#ssl-certificate-stuck-in-provisioning)
@@ -368,6 +372,84 @@ published on the
    subnet has Private Google Access enabled.
 3. If `ReadTimeout`: the request was too large or the model is overloaded.
    Retry or switch to `CLOUD_ML_REGION=global`.
+
+---
+
+## VPC internal mode issues
+
+### Connection timeout when calling gateway (VPC internal)
+
+**Symptom.** `curl` or Claude Code hangs and eventually times out when
+calling the gateway URL. No HTTP response at all (connection-level
+failure, not a 4xx/5xx).
+
+**Cause.** The Cloud Run services are deployed with `--ingress internal`.
+They are only reachable from within the VPC. Your machine is outside
+the VPC (no VPN, no Cloud Interconnect).
+
+**Fix.**
+1. Connect to the VPC via VPN or Cloud Interconnect.
+2. Or use the dev VM, which is already inside the VPC:
+   ```bash
+   gcloud compute ssh --tunnel-through-iap \
+     --project=PROJECT_ID --zone=ZONE claude-code-dev-shared
+   ```
+3. Or, if VPC internal mode is not required, redeploy with standard
+   ingress (`ENABLE_VPC_INTERNAL=false`).
+
+**How to confirm.** Check the ingress setting on the gateway:
+```bash
+gcloud run services describe llm-gateway \
+  --project PROJECT_ID --region REGION \
+  --format="value(spec.template.metadata.annotations['run.googleapis.com/ingress'])"
+```
+If it says `internal`, the service is in VPC internal mode.
+
+---
+
+### developer-setup.sh smoke test shows 000
+
+**Symptom.** `developer-setup.sh` completes configuration but the
+smoke test reports HTTP status `000` and prints a warning about
+unreachable services.
+
+**Cause.** HTTP status `000` means `curl` could not establish a TCP
+connection at all. This is expected when running `developer-setup.sh`
+from outside the VPC against services deployed with
+`--ingress internal`. The script detects this and skips the smoke test
+with a warning rather than failing.
+
+**Fix.** This is not an error — your configuration is still written
+correctly. To verify the deployment works, run the smoke test from
+within the VPC (e.g., from the dev VM):
+```bash
+gcloud compute ssh --tunnel-through-iap \
+  --project=PROJECT_ID --zone=ZONE claude-code-dev-shared
+# Then on the VM:
+curl -sS -w "%{http_code}" \
+  -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+  "$GATEWAY_URL/health"
+```
+
+---
+
+### e2e-test.sh exits with code 2
+
+**Symptom.** `e2e-test.sh` exits immediately with code 2 and a message
+about VPC internal ingress.
+
+**Cause.** The script detected that the Cloud Run services use
+`--ingress internal` and that it cannot reach them from the current
+network. Exit code 2 indicates a connectivity pre-check failure, not a
+test failure.
+
+**Fix.** Run the e2e tests from within the VPC:
+- SSH into the dev VM via IAP and run the script there.
+- Or run from any machine connected to the VPC via VPN or Cloud
+  Interconnect.
+
+The same applies to `seed-demo-data.sh` — it must also be run from
+within the VPC when services use internal ingress.
 
 ---
 
