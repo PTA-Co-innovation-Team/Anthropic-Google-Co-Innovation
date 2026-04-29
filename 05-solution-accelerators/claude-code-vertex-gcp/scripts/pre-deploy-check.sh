@@ -480,6 +480,67 @@ check_iap_firewall_rules() {
 }
 
 # =============================================================================
+# Check 29: deploy-dev-vm.sh provisions Cloud NAT before VM creation
+# =============================================================================
+check_deploy_cloud_nat() {
+  local script="${REPO_ROOT}/scripts/deploy-dev-vm.sh"
+  local missing=""
+  if ! grep -q 'routers create' "${script}" 2>/dev/null; then
+    missing+="cloud-router "
+  fi
+  if ! grep -q 'routers nats create' "${script}" 2>/dev/null; then
+    missing+="cloud-nat "
+  fi
+  if [[ -z "${missing}" ]]; then
+    local nat_line vm_line
+    nat_line=$(grep -n 'routers nats create' "${script}" | head -1 | cut -d: -f1)
+    vm_line=$(grep -n 'instances create' "${script}" | head -1 | cut -d: -f1)
+    if [[ -n "${nat_line}" && -n "${vm_line}" && "${nat_line}" -gt "${vm_line}" ]]; then
+      missing+="ordering(NAT-after-VM) "
+    fi
+  fi
+  [[ -z "${missing}" ]] || { echo "missing Cloud NAT in deploy-dev-vm.sh: ${missing}"; return 1; }
+}
+
+# =============================================================================
+# Check 30: Terraform network module has Cloud NAT resources
+# =============================================================================
+check_terraform_cloud_nat() {
+  local netmain="${REPO_ROOT}/terraform/modules/network/main.tf"
+  local netvars="${REPO_ROOT}/terraform/modules/network/variables.tf"
+  local rootmain="${REPO_ROOT}/terraform/main.tf"
+  local missing=""
+  if ! grep -q 'google_compute_router"' "${netmain}" 2>/dev/null; then
+    missing+="google_compute_router "
+  fi
+  if ! grep -q 'google_compute_router_nat' "${netmain}" 2>/dev/null; then
+    missing+="google_compute_router_nat "
+  fi
+  if ! grep -q 'enable_cloud_nat' "${netvars}" 2>/dev/null; then
+    missing+="enable_cloud_nat-variable "
+  fi
+  if ! grep -q 'enable_cloud_nat' "${rootmain}" 2>/dev/null; then
+    missing+="enable_cloud_nat-wiring "
+  fi
+  [[ -z "${missing}" ]] || { echo "Cloud NAT missing from Terraform: ${missing}"; return 1; }
+}
+
+# =============================================================================
+# Check 31: Teardown cleans up Cloud NAT and Cloud Router
+# =============================================================================
+check_teardown_cloud_nat() {
+  local teardown="${REPO_ROOT}/scripts/teardown.sh"
+  local missing=""
+  if ! grep -q 'claude-code-nat' "${teardown}" 2>/dev/null; then
+    missing+="cloud-nat "
+  fi
+  if ! grep -q 'claude-code-router' "${teardown}" 2>/dev/null; then
+    missing+="cloud-router "
+  fi
+  [[ -z "${missing}" ]] || { echo "teardown missing Cloud NAT cleanup: ${missing}"; return 1; }
+}
+
+# =============================================================================
 # Run all checks
 # =============================================================================
 log_step "Pre-deploy code consistency checks"
@@ -527,6 +588,12 @@ log_info "--- IAP Access Model ---"
 _check "25. deploy.sh prompts do not mention VPN" check_no_vpn_in_prompts
 _check "26. Developer scripts guide toward IAP" check_iap_guidance_not_vpn
 _check "27. IAP firewall rules in network module" check_iap_firewall_rules
+
+echo "" >&2
+log_info "--- Cloud NAT ---"
+_check "29. deploy-dev-vm.sh provisions Cloud NAT" check_deploy_cloud_nat
+_check "30. Terraform network module has Cloud NAT" check_terraform_cloud_nat
+_check "31. Teardown cleans up Cloud NAT + Router" check_teardown_cloud_nat
 
 echo "" >&2
 log_info "--- Teardown Coverage ---"

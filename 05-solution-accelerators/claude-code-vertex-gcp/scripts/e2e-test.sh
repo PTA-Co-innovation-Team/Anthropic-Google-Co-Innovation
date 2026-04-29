@@ -128,7 +128,7 @@ if [[ -n "${GATEWAY_URL}" ]]; then
   if [[ "${_probe}" == "000" ]]; then
     log_warn "gateway unreachable at ${GATEWAY_URL}"
     log_warn "if using VPC-internal ingress:"
-    log_warn "  1. SSH into the dev VM: gcloud compute ssh --tunnel-through-iap claude-code-dev-shared"
+    log_warn "  1. SSH into the dev VM: gcloud compute ssh claude-code-dev-shared --tunnel-through-iap --project=${PROJECT_ID} --zone=${CR_REGION}-a"
     log_warn "  2. Run this script from the dev VM (it is inside the VPC)"
     log_warn "  3. Or, if GLB is deployed, pass --gateway-url with the GLB URL"
     log_warn "No VPN required."
@@ -602,6 +602,38 @@ test_8_3_dev_vm_reaches_gateway() {
   [[ "${status}" == "200" ]] || { echo "dev VM cannot reach gateway (status=${status})"; return 1; }
 }
 
+test_8_4_cloud_nat_exists() {
+  if ! gcloud compute instances describe claude-code-dev-shared \
+       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
+    echo "no dev VM deployed"; return 2
+  fi
+  if ! gcloud compute routers describe claude-code-router \
+       --project "${PROJECT_ID}" --region "${CR_REGION}" >/dev/null 2>&1; then
+    echo "Cloud Router claude-code-router not found in ${CR_REGION}"
+    return 1
+  fi
+  if ! gcloud compute routers nats describe claude-code-nat \
+       --router claude-code-router \
+       --project "${PROJECT_ID}" --region "${CR_REGION}" >/dev/null 2>&1; then
+    echo "Cloud NAT claude-code-nat not found on router claude-code-router"
+    return 1
+  fi
+}
+
+test_8_5_dev_vm_reaches_internet() {
+  if ! gcloud compute instances describe claude-code-dev-shared \
+       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
+    echo "no dev VM deployed"; return 2
+  fi
+  local status
+  status=$(gcloud compute ssh claude-code-dev-shared \
+    --project "${PROJECT_ID}" --zone "${CR_REGION}-a" \
+    --tunnel-through-iap --command \
+    "curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 'https://registry.npmjs.org/'" \
+    2>/dev/null || echo "000")
+  [[ "${status}" == "200" ]] || { echo "dev VM cannot reach registry.npmjs.org (status=${status}). Cloud NAT may not be configured."; return 1; }
+}
+
 # -----------------------------------------------------------------------------
 # Execute
 # -----------------------------------------------------------------------------
@@ -670,6 +702,8 @@ run_test "8.1 IAP SSH firewall rule exists"        test_8_1_iap_ssh_firewall_rul
 run_test "8.2 IAP tunnel IAM bindings configured"  test_8_2_iap_tunnel_iam_bindings
 if [[ "${QUICK}" == "0" ]]; then
   run_test "8.3 dev VM can reach gateway internally" test_8_3_dev_vm_reaches_gateway
+  run_test "8.4 Cloud NAT exists for dev VM"         test_8_4_cloud_nat_exists
+  run_test "8.5 dev VM can reach non-Google hosts"   test_8_5_dev_vm_reaches_internet
 fi
 
 # -----------------------------------------------------------------------------
