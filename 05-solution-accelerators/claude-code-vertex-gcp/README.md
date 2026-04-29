@@ -331,12 +331,12 @@ Before deploying, run the local code-consistency checker:
 ./scripts/pre-deploy-check.sh
 ```
 
-This runs 30 checks validating that changes are internally consistent
+This runs 33 checks validating that changes are internally consistent
 across deploy scripts, Terraform modules, and application code (unit
 tests, token_validation.py sync, middleware registration, deploy
 script GLB/VPC-internal conditionals, Terraform variable wiring, IAP
-firewall rules, Cloud NAT provisioning, teardown coverage). No GCP
-credentials required.
+firewall rules, Cloud NAT provisioning, teardown coverage, Looker
+Studio view definitions). No GCP credentials required.
 
 ### Post-deploy e2e tests
 
@@ -347,11 +347,11 @@ end-to-end test script to confirm everything is wired up correctly:
 ./scripts/e2e-test.sh
 ```
 
-This runs eight layers of checks (31 tests) — infrastructure sanity,
+This runs eight layers of checks (34 tests) — infrastructure sanity,
 direct Vertex reachability, gateway proxy behavior, portal health, MCP
-tool invocation, negative tests (unauth rejection, no public IP),
-GLB-specific tests, and IAP access (dev VM, Cloud NAT, internet
-reachability). The GLB URL is auto-discovered from the project's
+tool invocation, negative tests (unauth rejection, no public IP,
+BigQuery view validation), GLB-specific tests, and IAP access (dev VM,
+Cloud NAT, internet reachability). The GLB URL is auto-discovered from the project's
 static IP or `GLB_DOMAIN` environment variable (you can also pass it
 explicitly with `--glb-url`). It prints a PASS/FAIL/SKIP summary and
 exits non-zero on any failure.
@@ -441,6 +441,16 @@ BigQuery. It auto-refreshes every 60 seconds.
 Data appears ~60 seconds after the first request through the LLM
 gateway. Access is gated by Cloud Run IAM (same principals as the
 gateways).
+
+For teams that want a custom **Looker Studio** report, the deploy
+script creates BigQuery views (`v_requests_summary`,
+`v_error_analysis`, `v_latency_stats`, `v_top_callers`,
+`v_recent_requests`) that provide stable data sources on top of the
+variable-named raw log table. Run `scripts/setup-looker-studio.sh` to
+generate a report URL, then add the remaining views as data sources
+inside the Looker Studio editor. See
+`observability/looker-studio-template.md` for panel-building
+instructions and template-based cloning for multi-project rollouts.
 
 ### Demo prep
 

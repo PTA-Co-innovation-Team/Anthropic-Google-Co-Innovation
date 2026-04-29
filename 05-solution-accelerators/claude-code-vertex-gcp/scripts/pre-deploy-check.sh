@@ -541,6 +541,61 @@ check_teardown_cloud_nat() {
 }
 
 # =============================================================================
+# Check 32: BQ view definitions in sync (bash deploy script + Terraform)
+# =============================================================================
+check_bq_view_definitions() {
+  local deploy="${REPO_ROOT}/scripts/deploy-observability.sh"
+  local tfmain="${REPO_ROOT}/terraform/modules/observability/main.tf"
+  local views=("v_requests_summary" "v_error_analysis" "v_latency_stats" "v_top_callers" "v_recent_requests")
+  local missing=""
+  for view in "${views[@]}"; do
+    if ! grep -q "${view}" "${deploy}" 2>/dev/null; then
+      missing+="${view}(bash) "
+    fi
+    if ! grep -q "${view}" "${tfmain}" 2>/dev/null; then
+      missing+="${view}(terraform) "
+    fi
+  done
+  [[ -z "${missing}" ]] || { echo "BQ view definitions out of sync: ${missing}"; return 1; }
+}
+
+# =============================================================================
+# Check 33: setup-looker-studio.sh exists and references all views
+# =============================================================================
+check_looker_studio_script() {
+  local script="${REPO_ROOT}/scripts/setup-looker-studio.sh"
+  local missing=""
+  if [[ ! -f "${script}" ]]; then
+    echo "scripts/setup-looker-studio.sh does not exist"; return 1
+  fi
+  local views=("v_requests_summary" "v_error_analysis" "v_latency_stats" "v_top_callers" "v_recent_requests")
+  for view in "${views[@]}"; do
+    if ! grep -q "${view}" "${script}" 2>/dev/null; then
+      missing+="${view} "
+    fi
+  done
+  if ! grep -q 'lookerstudio.google.com' "${script}" 2>/dev/null; then
+    missing+="lookerstudio-url "
+  fi
+  [[ -z "${missing}" ]] || { echo "setup-looker-studio.sh incomplete: ${missing}"; return 1; }
+}
+
+# =============================================================================
+# Check 34: Dashboard uses raw table discovery (not views)
+# =============================================================================
+check_dashboard_not_broken_by_views() {
+  local dashboard="${REPO_ROOT}/dashboard/app.py"
+  local missing=""
+  if ! grep -q 'INFORMATION_SCHEMA.TABLES' "${dashboard}" 2>/dev/null; then
+    missing+="INFORMATION_SCHEMA-discovery "
+  fi
+  if ! grep -q 'run_googleapis_com_' "${dashboard}" 2>/dev/null; then
+    missing+="raw-table-prefix "
+  fi
+  [[ -z "${missing}" ]] || { echo "dashboard lost raw table discovery: ${missing}"; return 1; }
+}
+
+# =============================================================================
 # Run all checks
 # =============================================================================
 log_step "Pre-deploy code consistency checks"
@@ -598,6 +653,12 @@ _check "31. Teardown cleans up Cloud NAT + Router" check_teardown_cloud_nat
 echo "" >&2
 log_info "--- Teardown Coverage ---"
 _check "28. Teardown handles all GLB resources" check_teardown_glb
+
+echo "" >&2
+log_info "--- Looker Studio ---"
+_check "32. BQ view definitions in sync (bash + TF)" check_bq_view_definitions
+_check "33. setup-looker-studio.sh exists and complete" check_looker_studio_script
+_check "34. Dashboard uses raw table discovery (not views)" check_dashboard_not_broken_by_views
 
 # --- Summary ---------------------------------------------------------------
 echo "" >&2

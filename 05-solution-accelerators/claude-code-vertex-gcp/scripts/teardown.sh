@@ -3,17 +3,19 @@
 # teardown.sh — interactive destroyer.
 #
 # Requires the user to type the project ID to confirm. Deletes:
-#   * Cloud Run services (llm-gateway, mcp-gateway, dev-portal)
+#   * Cloud Run services (llm-gateway, mcp-gateway, dev-portal,
+#     admin-dashboard)
 #   * GCE VM (claude-code-dev-shared) if present
 #   * Service accounts (llm-gateway, mcp-gateway, claude-code-dev-vm,
-#     dev-portal)
+#     dev-portal, admin-dashboard)
 #   * IAP SSH firewall rule (allow-iap-ssh)
 #
 # Does NOT:
 #   * Delete the Artifact Registry repo (keeps built images in case you
 #     re-deploy shortly after).
-#   * Delete the BigQuery dataset (may contain historical logs of
-#     interest). Use `bq rm -r -f` manually if you want to remove it.
+#   * Delete the BigQuery dataset or its Looker Studio views (may
+#     contain historical logs of interest). Use `bq rm -r -f` manually
+#     if you want to remove the dataset and views.
 #   * Disable APIs.
 # =============================================================================
 
