@@ -80,6 +80,38 @@ else
   log_info "Private Google Access already enabled"
 fi
 
+# --- Cloud NAT (egress to non-Google hosts) ---------------------------------
+# The VM has no public IP and PGA only covers Google APIs. Cloud NAT
+# provides outbound internet access so the startup script can reach
+# deb.debian.org, registry.npmjs.org, deb.nodesource.com, etc.
+log_step "ensure Cloud Router + Cloud NAT for dev VM egress"
+
+ROUTER_NAME="claude-code-router"
+NAT_NAME="claude-code-nat"
+
+if ! gcloud compute routers describe "${ROUTER_NAME}" \
+     --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" >/dev/null 2>&1; then
+  run_cmd gcloud compute routers create "${ROUTER_NAME}" \
+    --project "${PROJECT_ID}" \
+    --region "${FALLBACK_REGION}" \
+    --network default
+else
+  log_info "Cloud Router ${ROUTER_NAME} already exists"
+fi
+
+if ! gcloud compute routers nats describe "${NAT_NAME}" \
+     --router "${ROUTER_NAME}" \
+     --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" >/dev/null 2>&1; then
+  run_cmd gcloud compute routers nats create "${NAT_NAME}" \
+    --router "${ROUTER_NAME}" \
+    --project "${PROJECT_ID}" \
+    --region "${FALLBACK_REGION}" \
+    --auto-allocate-nat-external-ips \
+    --nat-all-subnet-ip-ranges
+else
+  log_info "Cloud NAT ${NAT_NAME} already exists"
+fi
+
 # --- IAP firewall rule ------------------------------------------------------
 log_step "ensure IAP SSH firewall rule"
 if ! gcloud compute firewall-rules describe allow-iap-ssh \

@@ -125,6 +125,21 @@ if gcloud compute instances describe claude-code-dev-shared \
     --project "${PROJECT_ID}" --zone "${ZONE}" --quiet
 fi
 
+# --- Cloud NAT + Cloud Router -----------------------------------------------
+log_step "delete Cloud NAT and Cloud Router (if present)"
+if gcloud compute routers nats describe claude-code-nat \
+     --router claude-code-router \
+     --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
+  run_cmd gcloud compute routers nats delete claude-code-nat \
+    --router claude-code-router \
+    --project "${PROJECT_ID}" --region "${REGION}" --quiet
+fi
+if gcloud compute routers describe claude-code-router \
+     --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
+  run_cmd gcloud compute routers delete claude-code-router \
+    --project "${PROJECT_ID}" --region "${REGION}" --quiet
+fi
+
 # --- Firewall ---------------------------------------------------------------
 log_step "delete IAP firewall rule"
 if gcloud compute firewall-rules describe allow-iap-ssh --project "${PROJECT_ID}" >/dev/null 2>&1; then

@@ -62,6 +62,7 @@ module "network" {
   region               = local.gce_region
   use_psc              = var.use_psc
   use_vpc_connector    = var.use_vpc_connector || var.enable_vpc_internal
+  enable_cloud_nat     = var.enable_dev_vm
   enable_vpc_internal  = var.enable_vpc_internal
   labels               = local.labels
 

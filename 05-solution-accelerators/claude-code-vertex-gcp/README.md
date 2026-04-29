@@ -255,6 +255,68 @@ Then just run `claude` — you're on Vertex.
 
 ---
 
+## Developer access via the dev VM
+
+If you deployed with the dev VM enabled (or with VPC internal mode), developers
+SSH into the shared VM via IAP and run Claude Code from there. No VPN is
+required.
+
+### Admin: onboarding a new developer
+
+**1. Add them to the gateway allowlist.** Re-run `deploy.sh` with their
+identity in the `allowed_principals` prompt, or update the running services
+directly:
+
+```bash
+# Add the new developer to ALLOWED_PRINCIPALS on both gateways.
+# Include all existing principals — this replaces the value.
+gcloud run services update llm-gateway \
+  --project PROJECT_ID --region REGION \
+  --update-env-vars "ALLOWED_PRINCIPALS=user:existing@company.com,user:newdev@company.com"
+
+gcloud run services update mcp-gateway \
+  --project PROJECT_ID --region REGION \
+  --update-env-vars "ALLOWED_PRINCIPALS=user:existing@company.com,user:newdev@company.com"
+```
+
+**2. Grant IAP SSH and OS Login access** so they can tunnel into the VM:
+
+```bash
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="user:newdev@company.com" \
+  --role="roles/iap.tunnelResourceAccessor" --condition=None --quiet
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="user:newdev@company.com" \
+  --role="roles/compute.osLogin" --condition=None --quiet
+```
+
+### Developer: connecting to the dev VM
+
+**1. SSH into the VM** (first-time use will generate SSH keys automatically):
+
+```bash
+gcloud compute ssh --tunnel-through-iap \
+  --project=PROJECT_ID --zone=REGION-a \
+  claude-code-dev-shared
+```
+
+**2. Start Claude Code** — the VM is pre-configured with gateway URLs:
+
+```bash
+claude
+```
+
+That's it. The VM's service account is already in the gateway's
+`ALLOWED_PRINCIPALS`, and ADC tokens are provided automatically via the
+GCE metadata server. See
+[ARCHITECTURE.md](../../04-best-practice-guides/claude-code-vertex-gcp/ARCHITECTURE.md)
+for the full design and
+[TROUBLESHOOTING.md](../../04-best-practice-guides/claude-code-vertex-gcp/TROUBLESHOOTING.md)
+for common issues (VPC connectivity, IAP firewall rules, token validation).
+
+---
+
 ## Validating your deployment
 
 ### Pre-deploy checks (no GCP access needed)
@@ -265,11 +327,11 @@ Before deploying, run the local code-consistency checker:
 ./scripts/pre-deploy-check.sh
 ```
 
-This runs 19 checks validating that GLB + hybrid-auth changes are
-internally consistent across deploy scripts, Terraform modules, and
-application code (unit tests, token_validation.py sync, middleware
-registration, deploy script GLB conditionals, Terraform variable
-wiring, teardown coverage). No GCP credentials required.
+This runs 27 checks validating that changes are internally consistent
+across deploy scripts, Terraform modules, and application code (unit
+tests, token_validation.py sync, middleware registration, deploy
+script GLB/VPC-internal conditionals, Terraform variable wiring, IAP
+firewall rules, teardown coverage). No GCP credentials required.
 
 ### Post-deploy e2e tests
 

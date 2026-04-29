@@ -78,7 +78,7 @@ if [[ -z "${LLM_GATEWAY_URL:-}" ]]; then
       _discovered="$(gcloud run services describe llm-gateway \
                        --project "${PROJECT_ID}" --region "${_try_region}" \
                        --format="value(status.url)" 2>/dev/null || echo "")"
-      [[ -n "${_discovered}" ]] && break
+      [[ -n "${_discovered}" ]] && { _CR_REGION="${_try_region}"; break; }
     done
   fi
   read -rp "LLM gateway URL [${_discovered}]: " LLM_GATEWAY_URL </dev/tty
@@ -222,7 +222,7 @@ if [[ "${_probe}" == "000" ]]; then
     log_info "     GLB detected: ${_glb_fallback}"
   fi
   log_warn "  2. SSH into the dev VM via IAP and run Claude Code from there:"
-  log_warn "       gcloud compute ssh --tunnel-through-iap --project=${PROJECT_ID} claude-code-dev-shared"
+  log_warn "       gcloud compute ssh claude-code-dev-shared --tunnel-through-iap --project=${PROJECT_ID} --zone=${_CR_REGION:-us-central1}-a"
   log_warn ""
   log_warn "No VPN required — IAP provides secure access."
   log_warn "skipping smoke test (service unreachable from this network)"

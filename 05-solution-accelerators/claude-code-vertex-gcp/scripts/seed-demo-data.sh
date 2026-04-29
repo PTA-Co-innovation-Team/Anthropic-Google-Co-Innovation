@@ -112,7 +112,7 @@ _probe="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 \
 if [[ "${_probe}" == "000" ]]; then
   log_error "gateway unreachable at ${GATEWAY_URL}"
   log_error "if using VPC-internal ingress, SSH into the dev VM via IAP and run from there:"
-  log_error "  gcloud compute ssh --tunnel-through-iap --project=${PROJECT_ID} claude-code-dev-shared"
+  log_error "  gcloud compute ssh claude-code-dev-shared --tunnel-through-iap --project=${PROJECT_ID} --zone=${CR_REGION}-a"
   log_error "No VPN required."
   exit 1
 fi

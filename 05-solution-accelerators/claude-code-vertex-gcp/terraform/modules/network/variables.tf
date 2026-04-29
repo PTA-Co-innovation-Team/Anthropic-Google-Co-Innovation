@@ -20,6 +20,12 @@ variable "use_vpc_connector" {
   default     = true
 }
 
+variable "enable_cloud_nat" {
+  description = "If true, create a Cloud Router and Cloud NAT gateway so VMs without public IPs can reach non-Google internet hosts (apt repos, npm registry, etc.). Required for the dev VM startup script."
+  type        = bool
+  default     = false
+}
+
 variable "enable_vpc_internal" {
   description = "When true, create firewall rules for VPC-internal-only access patterns. IAP provides developer access; VPN firewall rules are available for optional advanced configurations."
   type        = bool
