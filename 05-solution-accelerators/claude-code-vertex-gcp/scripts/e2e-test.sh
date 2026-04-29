@@ -3,10 +3,11 @@
 # e2e-test.sh — end-to-end validation of a deployed stack.
 #
 # Run this immediately after a deployment to confirm everything works.
-# The script is structured as six "layers" corresponding to the
-# validation layers in TEST-AND-DEMO-PLAN.md. Each layer has one or
-# more test functions; each function records PASS / FAIL / SKIP and
-# the script exits non-zero if any FAIL.
+# The script is structured as eight layers: infrastructure, network path,
+# gateway proxy, dev portal, MCP, negative + observability (incl. BigQuery
+# views), GLB, and IAP access. Each layer has one or more test functions;
+# each function records PASS / FAIL / SKIP and the script exits non-zero
+# if any FAIL.
 #
 # Modes:
 #   * default  — runs every automatable test.
@@ -353,6 +354,66 @@ test_6_4_dashboard_api() {
   fi
 }
 
+test_6_5_bigquery_views_exist() {
+  local token status
+  token="$(gcloud auth application-default print-access-token 2>/dev/null)"
+  [[ -n "${token}" ]] || { echo "no ADC token"; return 1; }
+  status=$(curl -sS -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer ${token}" \
+    "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/claude_code_logs" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "dataset claude_code_logs not found"; return 2; }
+
+  local views=("v_requests_summary" "v_error_analysis" "v_latency_stats" "v_top_callers" "v_recent_requests")
+  local missing=""
+  for view in "${views[@]}"; do
+    local code
+    code=$(curl -sS -o /dev/null -w "%{http_code}" \
+      -H "Authorization: Bearer ${token}" \
+      "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/claude_code_logs/tables/${view}" 2>/dev/null)
+    [[ "${code}" == "200" ]] || missing+="${view} "
+  done
+  if [[ -n "${missing}" ]]; then
+    echo "views not found: ${missing}(deploy-observability.sh creates them after first gateway request)"
+    return 2
+  fi
+}
+
+test_6_6_bigquery_view_queryable() {
+  local token
+  token="$(gcloud auth application-default print-access-token 2>/dev/null)"
+  [[ -n "${token}" ]] || { echo "no ADC token"; return 1; }
+  local code
+  code=$(curl -sS -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer ${token}" \
+    "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/claude_code_logs/tables/v_recent_requests" 2>/dev/null)
+  [[ "${code}" == "200" ]] || { echo "v_recent_requests not found"; return 2; }
+
+  local query_payload query_resp http_code
+  query_payload="{\"query\":\"SELECT COUNT(*) AS cnt FROM \\\`${PROJECT_ID}.claude_code_logs.v_recent_requests\\\`\",\"useLegacySql\":false}"
+  query_resp=$(curl -sS -w "\n%{http_code}" -X POST \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/queries" \
+    -d "${query_payload}" 2>/dev/null)
+  http_code="$(echo "${query_resp}" | tail -1)"
+  [[ "${http_code}" =~ ^2 ]] || { echo "view query failed (HTTP ${http_code})"; return 1; }
+}
+
+test_6_7_dashboard_independent_of_views() {
+  [[ -n "${DASHBOARD_URL}" ]] || { echo "dashboard not deployed"; return 2; }
+  local token status body
+  token="$(_get_token "${DASHBOARD_URL}")"
+  status=$(curl -sS -o /tmp/e2e_dash_indep.json -w "%{http_code}" \
+    -H "Authorization: Bearer ${token}" \
+    "${DASHBOARD_URL%/}/api/recent-requests?limit=5" 2>/dev/null)
+  [[ "${status}" == "200" ]] || { echo "dashboard API returned ${status}"; return 1; }
+  body=$(cat /tmp/e2e_dash_indep.json 2>/dev/null)
+  if ! echo "${body}" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+    echo "dashboard API returned invalid JSON (independence test)"
+    return 1
+  fi
+}
+
 # -----------------------------------------------------------------------------
 # Layer 2 — Network path (direct Vertex)
 # -----------------------------------------------------------------------------
@@ -684,6 +745,9 @@ if [[ "${QUICK}" == "0" ]]; then
   run_test "6.2 dev VM has no external IP"        test_6_2_no_external_ip_on_vm
   run_test "6.3 dashboard /health responds"       test_6_3_dashboard_health
   run_test "6.4 dashboard API returns JSON"       test_6_4_dashboard_api
+  run_test "6.5 BigQuery views exist"              test_6_5_bigquery_views_exist
+  run_test "6.6 BigQuery view is queryable"        test_6_6_bigquery_view_queryable
+  run_test "6.7 dashboard works independently of views" test_6_7_dashboard_independent_of_views
 fi
 
 if [[ -n "${GLB_URL}" ]]; then

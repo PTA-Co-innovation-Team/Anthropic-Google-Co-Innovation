@@ -6,7 +6,11 @@ advanced-query field. They all filter to just the LLM and MCP gateway
 services. Adjust the time range in the UI.
 
 If you prefer SQL, the same data lives in the BigQuery dataset
-`claude_code_logs` — use these as templates and translate.
+`claude_code_logs`. If BigQuery views have been created (by
+`deploy-observability.sh` or Terraform with `enable_looker_views`),
+you can query `v_recent_requests`, `v_requests_summary`, etc.
+directly — they provide clean column names without `jsonPayload`
+nesting. The raw queries below work regardless of whether views exist.
 
 ---
 

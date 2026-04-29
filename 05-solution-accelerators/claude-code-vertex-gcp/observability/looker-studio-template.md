@@ -1,31 +1,49 @@
 # Looker Studio dashboard setup (optional)
 
-> **Note:** The deploy scripts now create a **built-in Admin Dashboard**
+> **Note:** The deploy scripts create a **built-in Admin Dashboard**
 > (Cloud Run service) that provides real-time charts out of the box — no
 > Looker Studio setup required. This guide is for teams that want a
 > **custom** Looker Studio dashboard with their own panels and sharing
 > permissions.
 
-The `observability` Terraform module creates a BigQuery dataset called
-**`claude_code_logs`** and a Cloud Logging sink that routes all
-`llm-gateway` and `mcp-gateway` Cloud Run logs into it. This page walks
-you through pointing a Looker Studio dashboard at that dataset.
+---
 
-Time required: **~10 minutes**. Beginner-friendly.
+## Quick start
+
+The deploy script (`scripts/deploy-observability.sh`) automatically
+creates five BigQuery views that serve as stable data sources for
+Looker Studio. To generate a report URL:
+
+```bash
+scripts/setup-looker-studio.sh --project YOUR_PROJECT_ID
+```
+
+Open the primary URL in your browser — Looker Studio creates a new
+report with `v_recent_requests` as the initial data source. Then add
+the remaining four views inside the editor via **Resource > Manage
+added data sources > Add a data source > BigQuery** (select
+project > `claude_code_logs` dataset > view name).
+
+> **Why not all five at once?** The Looker Studio Linking API only
+> supports one data source per URL when creating a new report.
+> Multiple data sources require a template report (see
+> "Template-based cloning" below).
 
 ---
 
-## What the dashboard will show
+## What the views provide
 
-- Requests per day, per model, per caller
-- p50 / p95 / p99 latency to Vertex
-- Error rate over time (non-2xx responses)
-- Top token consumers (by caller email)
-- Which betas are being stripped (debug-only panel)
+| View | Purpose | Key columns |
+|------|---------|-------------|
+| `v_requests_summary` | Daily aggregated counts | `date`, `model`, `caller`, `vertex_region`, `request_count`, `error_count` |
+| `v_error_analysis` | Error breakdown by status code | `date`, `model`, `status_code`, `caller`, `count` |
+| `v_latency_stats` | Per-request latency for percentile charts | `date`, `model`, `caller`, `latency_ms` |
+| `v_top_callers` | Caller activity with model breakdown | `caller`, `model`, `request_count`, `error_count`, `first_seen`, `last_seen` |
+| `v_recent_requests` | Flat denormalized view for live tables | `timestamp`, `caller`, `model`, `status_code`, `latency_ms`, `vertex_region`, `path` |
 
-All of this is powered by the structured fields the LLM gateway emits —
-see `gateway/app/logging_config.py` and `gateway/app/proxy.py` for the
-exact shape.
+The views sit on top of the raw log table (whose name varies by GCP
+version) and provide clean, stable column names that Looker Studio can
+connect to reliably.
 
 ---
 
@@ -34,124 +52,135 @@ exact shape.
 1. The `observability` module has been deployed
    (`enable_observability: true` in `config.yaml` or
    `enable_observability = true` in `terraform.tfvars`).
-2. The gateways have received at least one request — otherwise the
-   dataset exists but is empty and Looker shows nothing.
-   Running `scripts/developer-setup.sh` and asking Claude a quick
-   question is the easiest way to generate data.
-3. You have **Viewer** on the BigQuery dataset in the deployment
-   project.
+2. The gateways have received at least one request — the raw log table
+   is created by Cloud Logging on first write, and the views reference it.
+   Running `scripts/seed-demo-data.sh` is the easiest way to generate data.
+3. You have **Viewer** on the BigQuery dataset in the deployment project.
 
 ---
 
-## 1. Confirm the dataset exists
+## Creating views
 
-In the Google Cloud Console:
+Views are created automatically by `scripts/deploy-observability.sh`
+after the raw log table exists. If you use Terraform, set
+`enable_looker_views = true` and `log_table_name` in your
+`terraform.tfvars`:
 
-1. Open **BigQuery** (https://console.cloud.google.com/bigquery).
-2. Select the deployment project in the top-left picker.
-3. Expand the project in the left panel. You should see a dataset
-   named **`claude_code_logs`** with a table called **`run_googleapis_com_requests`** (or similar — the log sink names the table after the log name).
+```hcl
+enable_looker_views = true
+log_table_name      = "run_googleapis_com_stdout"  # check your dataset
+```
 
-If the dataset is missing, the Terraform module probably wasn't
-applied. Check `enable_observability` in your config.
-
----
-
-## 2. Create the Looker Studio data source
-
-1. Open https://lookerstudio.google.com/.
-2. Click **Create → Data source**.
-3. Choose the **BigQuery** connector.
-4. Select your project → dataset `claude_code_logs` → table (the one
-   named like `run_googleapis_com_requests`, `run_googleapis_com_stdout`,
-   or similar).
-5. Click **Connect** (top-right).
-6. On the fields-review page, **do not change field types** — the
-   defaults are fine. Click **Create Report**.
+To find your table name, open BigQuery in the Console and look inside
+the `claude_code_logs` dataset for a table starting with
+`run_googleapis_com_`.
 
 ---
 
-## 3. Build the report panels
+## Building the report panels
 
-Looker Studio drops you into a blank report with the data source
-attached. Add these panels one by one.
-
-> Tip: all of these pull from fields inside `jsonPayload` (the parsed
-> JSON we emit from the gateway). Looker flattens these to paths like
-> `jsonPayload.caller`, `jsonPayload.model`, `jsonPayload.latency_ms_to_headers`.
+After opening the Looker Studio URL, add panels using the pre-connected
+data sources. Here are recommended panels:
 
 ### Panel A — Requests per day
 
+- Data source: `v_requests_summary`
 - Chart type: **Time series**
-- Date range: last 30 days
-- Date dimension: `timestamp`
-- Metric: **Record count** (Looker's built-in)
+- Date dimension: `date`
+- Metric: `request_count` (SUM)
 
 ### Panel B — Requests by model
 
+- Data source: `v_requests_summary`
 - Chart type: **Pie chart**
-- Dimension: `jsonPayload.model`
-- Metric: **Record count**
+- Dimension: `model`
+- Metric: `request_count` (SUM)
 
 ### Panel C — Top callers
 
+- Data source: `v_top_callers`
 - Chart type: **Table**
-- Dimension: `jsonPayload.caller`
-- Metric: **Record count**
-- Sort: count descending
-- Rows: 20
+- Dimension: `caller`
+- Metrics: `request_count`, `error_count`
+- Sort: `request_count` descending
 
-### Panel D — Error rate
+### Panel D — Error rate over time
 
+- Data source: `v_error_analysis`
 - Chart type: **Time series**
-- Date dimension: `timestamp`
-- Breakdown dimension: *(none)*
-- Metric: **calculated field** — paste this formula into a new field:
-  ```
-  SUM(IF(jsonPayload.status_code >= 400, 1, 0)) / COUNT(jsonPayload.status_code)
-  ```
-- Format the metric as **Percent**.
+- Date dimension: `date`
+- Metric: `count` (SUM)
+- Breakdown dimension: `status_code`
 
 ### Panel E — Latency percentiles
 
-- Chart type: **Scorecard** (three of them side by side)
-- Metric for each:
-  - Scorecard 1: **`PERCENTILE(jsonPayload.latency_ms_to_headers, 50)`** labelled "p50 ms"
-  - Scorecard 2: **`PERCENTILE(jsonPayload.latency_ms_to_headers, 95)`** labelled "p95 ms"
-  - Scorecard 3: **`PERCENTILE(jsonPayload.latency_ms_to_headers, 99)`** labelled "p99 ms"
+- Data source: `v_latency_stats`
+- Chart type: **Scorecard** (three side by side)
+- Metrics:
+  - `PERCENTILE(latency_ms, 50)` labelled "p50 ms"
+  - `PERCENTILE(latency_ms, 95)` labelled "p95 ms"
+  - `PERCENTILE(latency_ms, 99)` labelled "p99 ms"
 
-### Panel F — Experimental betas being stripped
+### Panel F — Recent requests
 
-(Useful for catching Claude Code versions with beta features Vertex
-rejects — you want this at zero.)
-
+- Data source: `v_recent_requests`
 - Chart type: **Table**
-- Dimension: `jsonPayload.betas_stripped` (treat as string)
-- Metric: **Record count**
-- Filter: `jsonPayload.betas_stripped` is not null and not `[]`.
+- Columns: `timestamp`, `caller`, `model`, `status_code`, `latency_ms`, `vertex_region`
+- Sort: `timestamp` descending
 
 ---
 
-## 4. Save + share
+## Template-based cloning (multi-project)
+
+Once you've built a compelling report with all five data sources and
+polished panels, you can turn it into a **template** that other
+projects clone with their own data:
+
+1. Open your finished report in Looker Studio.
+2. Copy the **report ID** from the URL:
+   `https://lookerstudio.google.com/reporting/<REPORT_ID>/page/...`
+3. Update `scripts/setup-looker-studio.sh`: set the `TEMPLATE_ID`
+   variable to your report ID (or pass `--template-id <id>`).
+4. When other projects run the script, it generates a clone URL:
+   ```
+   https://lookerstudio.google.com/reporting/create
+     ?c.reportId=<TEMPLATE_ID>
+     &ds.ds0.connector=bigQuery&ds.ds0.projectId=<THEIR_PROJECT>&...
+   ```
+   The `ds.ds0`–`ds.ds4` aliases remap each data source to the new
+   project's BigQuery views — the report layout, charts, and theme
+   are preserved from the template.
+
+> **Important:** For this to work, each data source in your template
+> must have a **Data source alias** set (`ds0` through `ds4`). In the
+> report editor: Resource > Manage added data sources > Edit (pencil
+> icon) > set the alias field. Map them as:
+> `ds0`=`v_requests_summary`, `ds1`=`v_error_analysis`,
+> `ds2`=`v_latency_stats`, `ds3`=`v_top_callers`,
+> `ds4`=`v_recent_requests`.
+
+---
+
+## Save + share
 
 1. Rename the report (top-left) to something like
    "Claude Code on Vertex — Ops".
-2. Click **Share → Add people**, grant Viewer to your team's Google
-   group.
+2. Click **Share > Add people**, grant Viewer to your team's Google group.
 
 ---
 
-## 5. Tips for operators
+## Tips for operators
 
-- **Ingestion lag** from Cloud Logging → BigQuery is usually < 1 minute
-  but can spike under heavy write load. If the dashboard looks empty,
-  check the sink's write activity under the BigQuery → Table Info pane.
+- **Ingestion lag** from Cloud Logging to BigQuery is usually < 1 minute
+  but can spike under heavy write load.
 - **Cost.** The sink writes partitioned tables; the Terraform module
-  sets `default_partition_expiration_ms` from
-  `var.log_retention_days` (90 days by default). Shorten it to reduce
-  storage cost.
-- **Quota alerts.** Consider a Looker alert on Panel D (error rate) so
-  you catch 429 spikes the moment they happen.
+  sets `default_partition_expiration_ms` from `var.log_retention_days`
+  (90 days by default). Shorten it to reduce storage cost.
+- **View recreation.** Views are recreated on each
+  `deploy-observability.sh` run (idempotent PUT). If you change the raw
+  table name, re-run the deploy script.
+- **Quota alerts.** Consider a Looker Studio alert on Panel D (error
+  rate) to catch 429 spikes.
 
 ---
 
@@ -166,7 +195,7 @@ Each Cloud Run log entry emitted by the gateway has a structured
 | `caller` | string | `[email protected]` |
 | `caller_source` | string | `cloud_run` / `iap` / `unknown` |
 | `method` | string | `POST` |
-| `path` | string | `/v1/projects/…/publishers/anthropic/models/claude-opus-4-6:rawPredict` |
+| `path` | string | `/v1/projects/.../publishers/anthropic/models/claude-opus-4-6:rawPredict` |
 | `upstream_host` | string | `us-east5-aiplatform.googleapis.com` |
 | `vertex_region` | string | `us-east5` |
 | `model` | string | `claude-opus-4-6` |
@@ -175,4 +204,4 @@ Each Cloud Run log entry emitted by the gateway has a structured
 | `betas_stripped` | list | `["anthropic-beta"]` or `[]` |
 
 See `observability/log-queries.md` for raw Cloud Logging queries you
-can paste into the Logs Explorer without spinning up Looker.
+can paste into the Logs Explorer without spinning up Looker Studio.

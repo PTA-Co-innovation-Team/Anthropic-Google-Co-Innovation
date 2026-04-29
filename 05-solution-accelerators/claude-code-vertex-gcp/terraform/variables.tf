@@ -62,9 +62,21 @@ variable "enable_dev_portal" {
 }
 
 variable "enable_observability" {
-  description = "Install log sink → BigQuery (for the Looker Studio dashboard)."
+  description = "Install log sink → BigQuery (admin dashboard + optional Looker Studio views)."
   type        = bool
   default     = true
+}
+
+variable "enable_looker_views" {
+  description = "Create BigQuery views for Looker Studio. Enable after the log sink has created its first table (requires at least one gateway request)."
+  type        = bool
+  default     = false
+}
+
+variable "log_table_name" {
+  description = "Name of the BigQuery table created by the Cloud Logging sink. Varies by GCP version; check the dataset in the BigQuery console. Common values: run_googleapis_com_stdout, run_googleapis_com_requests."
+  type        = string
+  default     = "run_googleapis_com_stdout"
 }
 
 # -----------------------------------------------------------------------------
