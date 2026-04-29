@@ -35,6 +35,13 @@ _TOKEN_CACHE: cachetools.TTLCache[str, str] = cachetools.TTLCache(
     maxsize=1024, ttl=30
 )
 
+# Maps a GCE service account numeric unique ID (from tokeninfo ``azp``)
+# to its email. GCE metadata tokens don't include ``email`` in tokeninfo,
+# so we resolve it once via the IAM API and cache it.
+_SA_ID_TO_EMAIL: cachetools.TTLCache[str, str] = cachetools.TTLCache(
+    maxsize=256, ttl=3600
+)
+
 _SKIP_PATHS = frozenset({"/health", "/healthz"})
 
 
@@ -56,8 +63,13 @@ _ALLOWED_PRINCIPALS = _load_allowed_principals()
 
 
 def _is_jwt(token: str) -> bool:
+    if token.startswith("ya29."):
+        return False
     parts = token.split(".")
-    return len(parts) == 3 and all(parts)
+    if len(parts) != 3 or not all(parts):
+        return False
+    # Real JWTs have a base64url-encoded header ≥ 20 chars.
+    return len(parts[0]) >= 20
 
 
 async def _verify_oidc_token(token: str) -> Optional[str]:
@@ -68,6 +80,37 @@ async def _verify_oidc_token(token: str) -> Optional[str]:
         return claims.get("email")
     except Exception:
         log.debug("oidc_verification_failed", exc_info=True)
+        return None
+
+
+async def _resolve_sa_email(unique_id: str) -> Optional[str]:
+    """Resolve a service account email from its numeric unique ID via IAM."""
+    cached = _SA_ID_TO_EMAIL.get(unique_id)
+    if cached is not None:
+        return cached
+
+    try:
+        import google.auth
+        import google.auth.transport.requests
+
+        credentials, _ = google.auth.default()
+        credentials.refresh(google.auth.transport.requests.Request())
+
+        url = f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{unique_id}"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {credentials.token}"},
+            )
+        if resp.status_code != 200:
+            log.warning("sa_lookup_failed status=%d id=%s", resp.status_code, unique_id)
+            return None
+        email = resp.json().get("email")
+        if email:
+            _SA_ID_TO_EMAIL[unique_id] = email
+        return email
+    except Exception:
+        log.debug("sa_lookup_error", exc_info=True)
         return None
 
 
@@ -86,6 +129,14 @@ async def _verify_access_token(token: str) -> Optional[str]:
             return None
         data = resp.json()
         email = data.get("email")
+
+        # GCE metadata tokens don't include email in tokeninfo.
+        # Fall back to resolving via IAM API using the numeric unique ID.
+        if not email:
+            unique_id = data.get("azp")
+            if unique_id and unique_id.isdigit():
+                email = await _resolve_sa_email(unique_id)
+
         if email:
             _TOKEN_CACHE[token] = email
         return email

@@ -152,7 +152,8 @@ def build_document():
         ("9", "Populating the Dashboard: seed-demo-data.sh"),
         ("10", "Viewing the Admin Dashboard"),
         ("11", "Access Tiers and Security Model"),
-        ("12", "Validation and Regression Testing"),
+        ("12", "Developer Onboarding"),
+        ("13", "Validation and Regression Testing"),
         ("A", "Complete Lifecycle Diagram"),
     ]
     for num, title in toc_items:
@@ -496,18 +497,25 @@ gcloud iam service-accounts create llm-gateway \\
     )
 
     doc.add_heading("2.2 IAM Role Grants", level=2)
-    doc.add_paragraph("Two project-level roles are granted to the service account:")
+    doc.add_paragraph("Three project-level roles are granted to the service account:")
     add_table(doc,
         ["Role", "Purpose"],
         [
             ["roles/aiplatform.user", "Call Vertex AI inference endpoints"],
             ["roles/logging.logWriter", "Write structured log entries to Cloud Logging"],
+            ["roles/iam.serviceAccountViewer", "Resolve GCE service account emails from numeric IDs (needed for dev VM token validation)"],
         ],
     )
     doc.add_paragraph("")
     doc.add_paragraph(
         "This service account — not the developer — authenticates to Vertex AI. "
         "Developers never receive roles/aiplatform.user directly."
+    )
+    doc.add_paragraph(
+        "The iam.serviceAccountViewer role is required because GCE metadata tokens "
+        "(used by the dev VM) do not include an email in the tokeninfo response — "
+        "only a numeric unique ID. The gateway resolves the email via the IAM API "
+        "so it can match against ALLOWED_PRINCIPALS."
     )
 
     doc.add_heading("2.3 Container Image Build", level=2)
@@ -613,7 +621,7 @@ gcloud run deploy llm-gateway \\
         ["Aspect", "LLM Gateway", "MCP Gateway"],
         [
             ["Service account", "llm-gateway", "mcp-gateway"],
-            ["IAM roles", "aiplatform.user + logging.logWriter", "logging.logWriter only"],
+            ["IAM roles", "aiplatform.user + logging.logWriter + iam.serviceAccountViewer", "logging.logWriter + iam.serviceAccountViewer"],
             ["Source directory", "gateway/", "mcp-gateway/"],
             ["Framework", "FastAPI + httpx reverse proxy", "FastAPI + FastMCP (Streamable HTTP)"],
             ["Max instances", "10", "5"],
@@ -762,17 +770,27 @@ Request arrives
   |-- Not "Bearer <token>" format?
   |     +-- 401 {"error": "invalid_token"}
   |
-  |-- Token looks like a JWT (3 dot-separated parts)?
+  |-- Classify token type:
+  |     |-- Starts with "ya29."? --> access token (skip JWT path)
+  |     |-- 3 dot-separated parts, header >= 20 chars? --> JWT
+  |     +-- Otherwise --> access token
+  |
+  |-- JWT path:
   |     +-- Verify via google.oauth2.id_token.verify_oauth2_token()
   |         (checks signature against Google's public keys)
+  |         Extract email from claims
   |
-  |-- Token is an access token (not JWT)?
+  |-- Access token path:
   |     +-- Check TTL cache (1024 entries, 30-second TTL)
   |         |-- Cache hit: use cached email
   |         +-- Cache miss: call googleapis.com/tokeninfo
-  |             Parse email from response, cache result
+  |             |-- email in response? --> use it, cache result
+  |             +-- No email (GCE metadata token)?
+  |                   Resolve via IAM API: GET /v1/projects/-/serviceAccounts/{azp}
+  |                   (azp = numeric SA unique ID from tokeninfo)
+  |                   Cache resolved email (256 entries, 1-hour TTL)
   |
-  |-- Verification failed?
+  |-- Verification failed (no email resolved)?
   |     +-- 401 {"error": "invalid_token", "detail": "..."}
   |
   |-- ALLOWED_PRINCIPALS set and email not in list?
@@ -780,6 +798,21 @@ Request arrives
   |
   +-- Store caller_email and caller_source in request.state
       Pass to next handler""")
+
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "The ya29.* prefix check is critical: GCE metadata tokens (ya29.c.*) have "
+        "three dot-separated parts, which would otherwise pass the JWT heuristic and "
+        "be sent to OIDC verification, where they always fail. The prefix check "
+        "short-circuits this misclassification."
+    )
+    doc.add_paragraph(
+        "The IAM API fallback exists because GCE metadata tokens return only a numeric "
+        "azp (authorized party) in the tokeninfo response, not an email. The gateway "
+        "calls IAM to resolve the service account email, which is then matched against "
+        "ALLOWED_PRINCIPALS. Results are cached for 1 hour to avoid per-request IAM "
+        "API calls. This path requires roles/iam.serviceAccountViewer on the gateway SA."
+    )
 
     doc.add_heading("6.3 Proxy Logic (proxy.py)", level=2)
     doc.add_paragraph(
@@ -1221,6 +1254,13 @@ Developer laptop
         "VM. The dev VM is pre-configured with Claude Code, ADC credentials, and "
         "gateway URLs pointing at the internal Cloud Run services."
     )
+    doc.add_paragraph(
+        "deploy-dev-vm.sh handles two critical networking prerequisites "
+        "automatically: (1) enabling Private Google Access on the default subnet "
+        "(required for the no-public-IP VM to reach Cloud Run *.run.app endpoints), "
+        "and (2) granting roles/run.invoker on the admin dashboard to the VM's "
+        "service account (so developers can view the dashboard from the VM)."
+    )
     add_diagram(doc, """\
 Developer laptop
   |-- gcloud compute ssh --tunnel-through-iap claude-code-dev-shared
@@ -1257,11 +1297,112 @@ gcloud compute ssh claude-code-dev-shared --tunnel-through-iap \\
     doc.add_page_break()
 
     # =================================================================
-    # STAGE 12
+    # STAGE 12 — Developer Onboarding
     # =================================================================
-    doc.add_heading("12. Validation and Regression Testing", level=1)
+    doc.add_heading("12. Developer Onboarding", level=1)
+    doc.add_paragraph(
+        "This section covers the two workflows needed to get a new developer "
+        "productive: the admin steps to grant access, and the developer steps "
+        "to connect."
+    )
 
-    doc.add_heading("12.1 Pre-Deploy Checks: pre-deploy-check.sh", level=2)
+    doc.add_heading("12.1 Admin: Onboarding a New Developer", level=2)
+    doc.add_paragraph(
+        "An admin (project owner/editor) performs these steps to grant a new "
+        "developer access to the deployment:"
+    )
+
+    p = doc.add_paragraph()
+    run = p.add_run("Step 1 — Add the developer to ALLOWED_PRINCIPALS. ")
+    run.bold = True
+    p.add_run(
+        "Update config.yaml (or the Terraform allowed_principals variable) to "
+        "include the developer's identity, then re-deploy the gateways so the "
+        "ALLOWED_PRINCIPALS environment variable is updated."
+    )
+    add_code_block(doc, """\
+# Re-deploy gateways with updated principals
+cd scripts && ./deploy.sh""")
+
+    doc.add_paragraph("")
+    p = doc.add_paragraph()
+    run = p.add_run("Step 2 — Grant IAP tunnel and OS Login roles (dev VM access). ")
+    run.bold = True
+    p.add_run(
+        "If the developer will access the dev VM, grant two IAM roles:"
+    )
+    add_code_block(doc, """\
+gcloud projects add-iam-policy-binding $PROJECT_ID \\
+  --member="user:developer@example.com" \\
+  --role="roles/iap.tunnelResourceAccessor" --condition=None --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \\
+  --member="user:developer@example.com" \\
+  --role="roles/compute.osLogin" --condition=None --quiet""")
+
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "These roles are granted automatically by deploy-dev-vm.sh for identities "
+        "listed in PRINCIPALS at deploy time. For developers added later, the admin "
+        "runs the commands above manually."
+    )
+
+    p = doc.add_paragraph()
+    run = p.add_run("Step 3 (optional) — Grant dashboard access. ")
+    run.bold = True
+    p.add_run(
+        "The admin dashboard uses Cloud Run IAM (roles/run.invoker). Grant it "
+        "per-service:"
+    )
+    add_code_block(doc, """\
+gcloud run services add-iam-policy-binding admin-dashboard \\
+  --project=$PROJECT_ID --region=$REGION \\
+  --member="user:developer@example.com" \\
+  --role="roles/run.invoker" --quiet""")
+
+    doc.add_heading("12.2 Developer: Connecting to the Dev VM", level=2)
+    doc.add_paragraph(
+        "Once the admin has completed onboarding, the developer connects with "
+        "a single command:"
+    )
+    add_code_block(doc, """\
+gcloud compute ssh claude-code-dev-shared \\
+  --tunnel-through-iap \\
+  --project=$PROJECT_ID \\
+  --zone=$ZONE""")
+
+    doc.add_paragraph("")
+    doc.add_paragraph(
+        "On first connection, gcloud generates an SSH key pair and pushes it "
+        "via OS Login. This takes 10-20 seconds. Subsequent connections are "
+        "instant."
+    )
+    doc.add_paragraph(
+        "Once on the VM, the developer simply runs claude — the CLI is pre-installed "
+        "and settings.json is pre-configured with the gateway URLs and project settings. "
+        "No additional setup is required."
+    )
+
+    doc.add_heading("12.3 What the Dev VM Provides", level=2)
+    add_table(doc,
+        ["Component", "Details"],
+        [
+            ["Claude Code CLI", "Pre-installed via npm at startup"],
+            ["settings.json", "Pre-configured with gateway URLs, project ID, region, model pins"],
+            ["ADC credentials", "VM service account, auto-rotated by GCE metadata server"],
+            ["VS Code Server", "Browser-based IDE (optional, controlled by install_vscode_server)"],
+            ["Auto-shutdown", "Shuts down after N hours idle (default: 2) to save costs"],
+        ],
+    )
+
+    doc.add_page_break()
+
+    # =================================================================
+    # STAGE 13
+    # =================================================================
+    doc.add_heading("13. Validation and Regression Testing", level=1)
+
+    doc.add_heading("13.1 Pre-Deploy Checks: pre-deploy-check.sh", level=2)
     doc.add_paragraph(
         "A local code consistency validator that runs without GCP access. It "
         "validates cross-file parity across deploy scripts, Terraform modules, "
@@ -1280,7 +1421,7 @@ gcloud compute ssh claude-code-dev-shared --tunnel-through-iap \\
         ],
     )
 
-    doc.add_heading("12.2 End-to-End Tests: e2e-test.sh", level=2)
+    doc.add_heading("13.2 End-to-End Tests: e2e-test.sh", level=2)
     doc.add_paragraph(
         "An 8-layer test suite that validates the full deployment from "
         "infrastructure through IAP access. Tests return PASS (0), FAIL (1), "
@@ -1332,12 +1473,12 @@ deploy.sh
   |
   |-- deploy-llm-gateway.sh
   |     |-- Create SA (llm-gateway)
-  |     |-- Grant roles/aiplatform.user + roles/logging.logWriter
+  |     |-- Grant roles/aiplatform.user + logging.logWriter + iam.serviceAccountViewer
   |     |-- Docker build (multi-stage, ~120MB)
   |     |-- Three-way ingress: standard / GLB / VPC-internal
   |     +-- Cloud Run deploy (--no-invoker-iam-check, ENABLE_TOKEN_VALIDATION=1)
   |
-  |-- deploy-mcp-gateway.sh  (same shape, same three-way ingress)
+  |-- deploy-mcp-gateway.sh  (same shape, + iam.serviceAccountViewer)
   |-- deploy-dev-portal.sh   (nginx, placeholder substitution, three-way ingress)
   |
   |-- deploy-observability.sh
@@ -1347,7 +1488,10 @@ deploy.sh
   |
   |-- (optional) deploy-glb.sh   (mutually exclusive with VPC-internal)
   |     +-- deploy-dev-portal.sh (re-deployed to inject GLB URLs)
-  +-- (optional) deploy-dev-vm.sh (recommended for VPC-internal; always last)""")
+  +-- (optional) deploy-dev-vm.sh (recommended for VPC-internal; always last)
+        |-- Enable Private Google Access on subnet
+        |-- Grant VM SA roles/run.invoker on dashboard
+        +-- Create GCE VM (no public IP, IAP SSH, OS Login)""")
 
     doc.add_paragraph("")
 
@@ -1383,7 +1527,9 @@ claude (developer runs Claude Code)
   |-- Reads settings.json --> ANTHROPIC_VERTEX_BASE_URL
   |-- Sends POST /projects/P/locations/R/.../models/M:rawPredict
   |     (OAuth2 access token, no /v1/ prefix)
-  |-- --> token_validation.py validates token, checks ALLOWED_PRINCIPALS
+  |-- --> token_validation.py classifies token (ya29.* = access, else JWT)
+  |       validates token, resolves email (IAM API fallback for GCE tokens)
+  |       checks ALLOWED_PRINCIPALS
   |-- --> proxy.py normalizes path (/v1/), strips headers, adds SA token
   |-- --> Vertex AI processes request
   |-- --> Response streamed back through gateway

@@ -65,6 +65,21 @@ for role in roles/aiplatform.user roles/logging.logWriter; do
     --member="serviceAccount:${SA_EMAIL}" --role="${role}" --condition=None --quiet
 done
 
+# --- Private Google Access ---------------------------------------------------
+# The VM has no public IP, so the subnet needs PGA enabled for the VM to
+# reach Cloud Run services (*.run.app) and Google APIs.
+log_step "ensure Private Google Access on default subnet"
+_pga="$(gcloud compute networks subnets describe default \
+  --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+  --format="value(privateIpGoogleAccess)" 2>/dev/null || echo "")"
+if [[ "${_pga}" != "True" ]]; then
+  run_cmd gcloud compute networks subnets update default \
+    --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+    --enable-private-ip-google-access
+else
+  log_info "Private Google Access already enabled"
+fi
+
 # --- IAP firewall rule ------------------------------------------------------
 log_step "ensure IAP SSH firewall rule"
 if ! gcloud compute firewall-rules describe allow-iap-ssh \
@@ -143,6 +158,15 @@ if ! gcloud compute instances describe "${VM_NAME}" \
     --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring
 else
   log_info "VM already exists, leaving alone (re-run teardown.sh to recreate)"
+fi
+
+# --- Grant VM SA run.invoker on dashboard (if deployed) --------------------
+if gcloud run services describe admin-dashboard \
+     --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" >/dev/null 2>&1; then
+  log_step "grant VM SA invoker on admin-dashboard"
+  run_cmd gcloud run services add-iam-policy-binding admin-dashboard \
+    --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+    --member="serviceAccount:${SA_EMAIL}" --role="roles/run.invoker" --quiet
 fi
 
 # --- Grant IAP tunnel + OS Login to each principal --------------------------
