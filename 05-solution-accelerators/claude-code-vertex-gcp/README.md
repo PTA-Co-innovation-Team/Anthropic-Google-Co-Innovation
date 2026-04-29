@@ -35,7 +35,7 @@ When this is done deploying, your GCP project will contain:
 | **LLM Gateway** | Cloud Run service — tiny FastAPI reverse proxy | Single point for auth, logging, and header sanitation in front of Vertex AI |
 | **MCP Gateway** | Cloud Run service — FastMCP over Streamable HTTP | Place to host your organization's custom MCP tools |
 | **Dev Portal** | Cloud Run static site | Self-service setup instructions for your developers (IAP-protected in GLB mode, Cloud Run IAM in standard mode) |
-| **Dev VM** *(optional, off by default)* | GCE VM with VS Code Server, accessed via IAP | Cloud dev environment for teams that don't want local installs |
+| **Dev VM** *(optional, off by default)* | GCE VM with VS Code Server, accessed via IAP. Cloud NAT provides outbound internet (no public IP). | Cloud dev environment for teams that don't want local installs |
 | **Observability** | Log sink → BigQuery + built-in admin dashboard | Admin dashboard: who is using Claude, how much, errors, top models |
 
 **Standard mode:** The LLM and MCP gateways use **app-level token validation**
@@ -63,6 +63,10 @@ and skips the smoke test with a warning. `e2e-test.sh` and
 `seed-demo-data.sh` must be run from within the VPC (e.g., from the dev VM).
 
 The Dev VM has **no public IP** and is reached via IAP TCP tunneling.
+Cloud NAT provides outbound-only internet access so the VM's startup
+script can reach non-Google hosts (apt repos, npm registry, Node.js
+downloads). Cloud NAT adds ~$1/month and is provisioned automatically
+when the dev VM is enabled.
 
 ### Access Tiers (IAP-based, no VPN required)
 
@@ -327,11 +331,12 @@ Before deploying, run the local code-consistency checker:
 ./scripts/pre-deploy-check.sh
 ```
 
-This runs 27 checks validating that changes are internally consistent
+This runs 30 checks validating that changes are internally consistent
 across deploy scripts, Terraform modules, and application code (unit
 tests, token_validation.py sync, middleware registration, deploy
 script GLB/VPC-internal conditionals, Terraform variable wiring, IAP
-firewall rules, teardown coverage). No GCP credentials required.
+firewall rules, Cloud NAT provisioning, teardown coverage). No GCP
+credentials required.
 
 ### Post-deploy e2e tests
 
@@ -342,10 +347,11 @@ end-to-end test script to confirm everything is wired up correctly:
 ./scripts/e2e-test.sh
 ```
 
-This runs seven layers of checks — infrastructure sanity, direct Vertex
-reachability, gateway proxy behavior, MCP tool invocation, dev VM
-verification, negative tests (unauth rejection, no public IP), and
-GLB-specific tests. The GLB URL is auto-discovered from the project's
+This runs eight layers of checks (31 tests) — infrastructure sanity,
+direct Vertex reachability, gateway proxy behavior, portal health, MCP
+tool invocation, negative tests (unauth rejection, no public IP),
+GLB-specific tests, and IAP access (dev VM, Cloud NAT, internet
+reachability). The GLB URL is auto-discovered from the project's
 static IP or `GLB_DOMAIN` environment variable (you can also pass it
 explicitly with `--glb-url`). It prints a PASS/FAIL/SKIP summary and
 exits non-zero on any failure.
@@ -517,7 +523,7 @@ Idle is the common case. Typical monthly costs:
 | --- | --- |
 | **Default, idle** (LLM gateway + MCP gateway + portal, no dev VM, Private Google Access) | **~$0–5/month** |
 | **Default, light use** (a few developers) | **~$10–30/month** (Vertex tokens dominate) |
-| **Everything on** (incl. shared dev VM `e2-small`, log sink to BigQuery) | **~$25–50/month** |
+| **Everything on** (incl. shared dev VM `e2-small`, Cloud NAT, log sink to BigQuery) | **~$25–50/month** |
 | **+ GLB** (add to any configuration above) | **+~$18/month** |
 | **+ VPC internal** (add to any non-GLB configuration above) | **+~$0** (VPC Connector is forced on but has no additional charge beyond the default) |
 
