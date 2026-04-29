@@ -1,0 +1,44 @@
+# Deal Desk Agent — Local Development Stack
+# Usage: docker compose up --build
+# Access: Frontend at http://localhost:3000, noVNC at http://localhost:6080
+
+services:
+  # ─── FastAPI Backend ───
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      - PORT=8080
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
+    volumes:
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-~/.config/gcloud/application_default_credentials.json}:/app/credentials.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── React Frontend ───
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ─── Browser VM (Computer Use) ───
+  browser-vm:
+    build: ./computer-use
+    ports:
+      - "6080:6080"
+      - "5900:5900"
+    env_file: .env
+    environment:
+      - DISPLAY_WIDTH=1280
+      - DISPLAY_HEIGHT=800
+    volumes:
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-~/.config/gcloud/application_default_credentials.json}:/app/credentials.json:ro
+    shm_size: "2gb"

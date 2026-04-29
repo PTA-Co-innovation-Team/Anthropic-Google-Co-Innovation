@@ -1,0 +1,6 @@
+// Runtime configuration — populated at container startup by entrypoint.sh.
+// Vite copies this file to dist/ verbatim; envsubst rewrites it to /config.js.
+window.__APP_CONFIG__ = {
+  API_BASE: "${API_BASE}",
+  NOVNC_URL: "${NOVNC_URL}"
+};
