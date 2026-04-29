@@ -6,4 +6,4 @@ End-to-end functional examples and UI-driven applications that highlight the "Be
 
 | Demo | Description |
 |---|---|
-| [`claude-code-vertex-gcp`](./claude-code-vertex-gcp) | **Claude Code on Vertex AI — Test & Demo Plan** — six-layer validation procedure and a 5-minute live demo script for the reference architecture. |
+| [`deal-desk-agent`](./deal-desk-agent) | **FSI Deal Desk Pipeline** — Multi-agent client onboarding using Claude (Opus 4.5, Sonnet 4.6, Haiku 4.5) on Vertex AI, orchestrated by Google ADK, with a Computer Use Salesforce browser agent. Built for Google Cloud NEXT 2026. See [`README`](./deal-desk-agent/README.md) and the [engineering design doc](./deal-desk-agent/DESIGN.md). |
