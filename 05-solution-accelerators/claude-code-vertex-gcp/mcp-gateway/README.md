@@ -22,7 +22,9 @@ following [ADD_YOUR_OWN_TOOL.md](ADD_YOUR_OWN_TOOL.md).
 > rejects. Auth is handled by the `token_validation.py` middleware,
 > which enforces an `ALLOWED_PRINCIPALS` allowlist. In **standard mode**,
 > ingress is `all`; in **GLB mode**, ingress is
-> `internal-and-cloud-load-balancing` (only the GLB can reach the service).
+> `internal-and-cloud-load-balancing` (only the GLB can reach the service);
+> in **VPC internal mode**, ingress is `internal` (only clients within the
+> VPC can reach the service).
 
 The server is a **FastAPI app with FastMCP mounted at `/mcp`**. This
 lets us serve an unauthenticated `/health` alongside the MCP endpoint
@@ -104,17 +106,20 @@ first run.
 
 The deploy scripts set the Cloud Run service up like this:
 
-| Setting | Standard mode | GLB mode | Why |
-| --- | --- | --- | --- |
-| Ingress | `all` | `internal-and-cloud-load-balancing` | GLB restricts direct access. |
-| Auth | `--no-invoker-iam-check` | *(same)* | Cloud Run IAM disabled; app-level token validation handles auth. |
-| Env: `ENABLE_TOKEN_VALIDATION` | `1` | `1` | Activates `token_validation.py` middleware (always on). |
-| Env: `ALLOWED_PRINCIPALS` | comma-separated emails | *(same)* | Restricts which Google identities can call the gateway. |
-| Service account | dedicated SA with **only** the roles its tools need | *(same)* | Least privilege. |
-| CPU | 1 | *(same)* | Tools are I/O-bound. |
-| Memory | 512Mi | *(same)* | FastMCP + a few GCP clients fit easily. |
-| Min instances | 0 | *(same)* | Scales to zero when idle. |
-| Concurrency | 80 | *(same)* | Default; tools are stateless. |
+| Setting | Standard mode | GLB mode | VPC internal mode | Why |
+| --- | --- | --- | --- | --- |
+| Ingress | `all` | `internal-and-cloud-load-balancing` | `internal` | Standard: laptops reach directly. GLB: only GLB can reach it. VPC internal: only VPC clients can reach it. |
+| Auth | `--no-invoker-iam-check` | *(same)* | *(same)* | Cloud Run IAM disabled; app-level token validation handles auth. |
+| Env: `ENABLE_TOKEN_VALIDATION` | `1` | `1` | `1` | Activates `token_validation.py` middleware (always on). |
+| Env: `ALLOWED_PRINCIPALS` | comma-separated emails | *(same)* | *(same)* | Restricts which Google identities can call the gateway. |
+| VPC Connector | optional | optional | **forced on** | Required for Private Google Access egress in VPC internal mode. |
+| Service account | dedicated SA with **only** the roles its tools need | *(same)* | *(same)* | Least privilege. |
+| CPU | 1 | *(same)* | *(same)* | Tools are I/O-bound. |
+| Memory | 512Mi | *(same)* | *(same)* | FastMCP + a few GCP clients fit easily. |
+| Min instances | 0 | *(same)* | *(same)* | Scales to zero when idle. |
+| Concurrency | 80 | *(same)* | *(same)* | Default; tools are stateless. |
+
+VPC internal mode is mutually exclusive with GLB mode.
 
 ### Token validation middleware
 

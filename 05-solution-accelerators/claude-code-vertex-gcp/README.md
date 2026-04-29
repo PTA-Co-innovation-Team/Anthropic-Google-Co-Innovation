@@ -51,7 +51,40 @@ all services. Ingress is `internal-and-cloud-load-balancing`; the GLB is the
 only entry point. Gateways use the same app-level token validation as
 standard mode; portal and dashboard use IAP for browser auth.
 
+**VPC internal mode** *(optional, mutually exclusive with GLB mode):* All
+Cloud Run services use `--ingress internal` — they are only reachable from
+within the VPC. Developers access services through the dev VM, which is
+inside the VPC and accessed via IAP SSH tunneling (`gcloud compute ssh
+--tunnel-through-iap`). No VPN is required — IAP provides secure access.
+VPN/Cloud Interconnect remain available as optional advanced configurations.
+The VPC Connector is forced on so Cloud Run egress goes through the VPC for
+Private Google Access. `developer-setup.sh` detects unreachable services
+and skips the smoke test with a warning. `e2e-test.sh` and
+`seed-demo-data.sh` must be run from within the VPC (e.g., from the dev VM).
+
 The Dev VM has **no public IP** and is reached via IAP TCP tunneling.
+
+### Access Tiers (IAP-based, no VPN required)
+
+Both restricted-ingress modes use IAP as the access mechanism:
+
+**Tier 1 — GLB + IAP** (production): The Global Load Balancer fronts all
+services. Browser services (dev portal, admin dashboard) use IAP for
+Google SSO authentication. API services (llm-gateway, mcp-gateway) use
+app-level token validation. Requires a DNS domain for managed certificates.
+
+```
+Developer laptop ──(HTTPS + access token)──▶ GLB ──▶ Cloud Run (internal + GLB)
+                 ──(browser + IAP SSO)──────▶ GLB ──▶ Cloud Run (IAP-protected)
+```
+
+**Tier 2 — Dev VM + IAP SSH** (development/budget): No GLB needed. Cloud
+Run uses `--ingress internal`. Developers SSH into the dev VM via IAP and
+run Claude Code directly. The VM is pre-configured with gateway URLs.
+
+```
+Developer laptop ──(IAP SSH tunnel)──▶ Dev VM (inside VPC) ──▶ Cloud Run (internal)
+```
 
 ```
 Developer Laptop ──(gcloud auth + IAP)──▶ LLM Gateway (Cloud Run) ──▶ Vertex AI (Claude)
@@ -297,6 +330,11 @@ GLB's own health probes are automatic; for external monitoring,
 point an uptime check at the GLB URL with no auth header (the
 health endpoint is intentionally open).
 
+**VPC internal mode:** Cloud Run services use `ingress=internal` and
+are not reachable from outside the VPC. External uptime probes
+cannot reach them. Use Cloud Monitoring uptime checks from within
+the VPC, or rely on Cloud Run's built-in health reporting.
+
 #### SA-authenticated probe (standard mode)
 
 1. **Create a service account** for the probe:
@@ -419,6 +457,7 @@ Idle is the common case. Typical monthly costs:
 | **Default, light use** (a few developers) | **~$10–30/month** (Vertex tokens dominate) |
 | **Everything on** (incl. shared dev VM `e2-small`, log sink to BigQuery) | **~$25–50/month** |
 | **+ GLB** (add to any configuration above) | **+~$18/month** |
+| **+ VPC internal** (add to any non-GLB configuration above) | **+~$0** (VPC Connector is forced on but has no additional charge beyond the default) |
 
 See [COSTS.md](../../04-best-practice-guides/claude-code-vertex-gcp/COSTS.md) for the line-by-line breakdown.
 
@@ -433,9 +472,9 @@ Token costs for Claude on Vertex follow
 If setup or a request fails, check [TROUBLESHOOTING.md](../../04-best-practice-guides/claude-code-vertex-gcp/TROUBLESHOOTING.md)
 first — it covers deployment issues, authentication (ADC, IAM, IAP, token
 validation), runtime errors (beta headers, quotas, 502s), GLB-specific
-problems (SSL certs, URL map routing, IAP loops, auto-discovery), MCP
-handshake failures, observability pipeline debugging, and a detailed
-e2e/GLB test failure reference table.
+problems (SSL certs, URL map routing, IAP loops, auto-discovery), VPC
+internal mode connectivity, MCP handshake failures, observability pipeline
+debugging, and a detailed e2e/GLB test failure reference table.
 
 ---
 

@@ -58,11 +58,12 @@ resource "google_artifact_registry_repository" "images" {
 module "network" {
   source = "./modules/network"
 
-  project_id        = var.project_id
-  region            = local.gce_region
-  use_psc           = var.use_psc
-  use_vpc_connector = var.use_vpc_connector
-  labels            = local.labels
+  project_id           = var.project_id
+  region               = local.gce_region
+  use_psc              = var.use_psc
+  use_vpc_connector    = var.use_vpc_connector || var.enable_vpc_internal
+  enable_vpc_internal  = var.enable_vpc_internal
+  labels               = local.labels
 
   depends_on = [google_project_service.apis]
 }
@@ -80,9 +81,10 @@ module "llm_gateway" {
   image              = var.llm_gateway_image
   allowed_principals = local.gateway_allowed_principals
   vpc_connector_name = module.network.vpc_connector_name
-  use_vpc_connector  = var.use_vpc_connector
-  enable_glb         = var.enable_glb
-  labels             = local.labels
+  use_vpc_connector    = var.use_vpc_connector || var.enable_vpc_internal
+  enable_glb           = var.enable_glb
+  enable_vpc_internal  = var.enable_vpc_internal
+  labels               = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
 }
@@ -94,15 +96,16 @@ module "mcp_gateway" {
   count  = var.enable_mcp_gateway ? 1 : 0
   source = "./modules/mcp_gateway"
 
-  project_id         = var.project_id
-  region             = local.gce_region
-  vertex_region      = var.region
-  image              = var.mcp_gateway_image
-  allowed_principals = local.gateway_allowed_principals
-  vpc_connector_name = module.network.vpc_connector_name
-  use_vpc_connector  = var.use_vpc_connector
-  enable_glb         = var.enable_glb
-  labels             = local.labels
+  project_id           = var.project_id
+  region               = local.gce_region
+  vertex_region        = var.region
+  image                = var.mcp_gateway_image
+  allowed_principals   = local.gateway_allowed_principals
+  vpc_connector_name   = module.network.vpc_connector_name
+  use_vpc_connector    = var.use_vpc_connector || var.enable_vpc_internal
+  enable_glb           = var.enable_glb
+  enable_vpc_internal  = var.enable_vpc_internal
+  labels               = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
 }
@@ -114,12 +117,13 @@ module "dev_portal" {
   count  = var.enable_dev_portal ? 1 : 0
   source = "./modules/dev_portal"
 
-  project_id         = var.project_id
-  region             = local.gce_region
-  image              = var.dev_portal_image
-  allowed_principals = var.allowed_principals
-  enable_glb         = var.enable_glb
-  labels             = local.labels
+  project_id           = var.project_id
+  region               = local.gce_region
+  image                = var.dev_portal_image
+  allowed_principals   = var.allowed_principals
+  enable_glb           = var.enable_glb
+  enable_vpc_internal  = var.enable_vpc_internal
+  labels               = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
 }

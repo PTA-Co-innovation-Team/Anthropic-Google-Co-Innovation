@@ -121,7 +121,16 @@ variable "use_vpc_connector" {
 }
 
 # -----------------------------------------------------------------------------
-# Global Load Balancer (optional).
+# VPC internal ingress (optional). Mutually exclusive with enable_glb.
+# -----------------------------------------------------------------------------
+variable "enable_vpc_internal" {
+  description = "Restrict Cloud Run ingress to VPC-internal only. Developers access services via IAP: either through the GLB (Tier 1) or via the dev VM using IAP SSH tunneling (Tier 2). No VPN required. Mutually exclusive with enable_glb."
+  type        = bool
+  default     = false
+}
+
+# -----------------------------------------------------------------------------
+# Global Load Balancer (optional). Mutually exclusive with enable_vpc_internal.
 # -----------------------------------------------------------------------------
 variable "enable_glb" {
   description = "Deploy a Global HTTP(S) LB in front of Cloud Run. Changes ingress to internal-and-cloud-load-balancing. Adds ~$18/month."
@@ -219,6 +228,13 @@ locals {
     : var.region
   )
 
+  # Mutual exclusion: GLB and VPC-internal modes cannot both be enabled.
+  _validate_ingress_modes = (
+    var.enable_glb && var.enable_vpc_internal
+    ? file("ERROR: enable_glb and enable_vpc_internal are mutually exclusive")
+    : true
+  )
+
   # A shortened project identifier used to name resources that have a
   # character limit (log sinks, firewall rules). Strips non-alphanumerics.
   project_slug = replace(lower(var.project_id), "/[^a-z0-9]/", "-")
@@ -229,12 +245,12 @@ locals {
     managed-by  = "terraform"
   }
 
-  # When both GLB and dev VM are enabled, the dev VM's service account
-  # must be in the gateway's ALLOWED_PRINCIPALS so its ADC tokens pass
-  # the app-level token validation middleware.
+  # When dev VM is enabled alongside GLB or VPC-internal mode, the dev
+  # VM's service account must be in ALLOWED_PRINCIPALS so its ADC tokens
+  # pass the app-level token validation middleware.
   _dev_vm_sa_principal = "serviceAccount:claude-code-dev-vm@${var.project_id}.iam.gserviceaccount.com"
   gateway_allowed_principals = (
-    var.enable_glb && var.enable_dev_vm
+    (var.enable_glb || var.enable_vpc_internal) && var.enable_dev_vm
     ? concat(var.allowed_principals, [local._dev_vm_sa_principal])
     : var.allowed_principals
   )

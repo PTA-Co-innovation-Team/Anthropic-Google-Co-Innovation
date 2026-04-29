@@ -94,6 +94,8 @@ fi
 
 if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
   INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
+elif [[ "${ENABLE_VPC_INTERNAL:-false}" == "true" ]]; then
+  INGRESS_FLAG="--ingress internal"
 else
   INGRESS_FLAG="--ingress all"
 fi

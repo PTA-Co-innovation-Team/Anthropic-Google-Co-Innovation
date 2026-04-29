@@ -131,6 +131,9 @@ log_step "deploy Cloud Run service ${SERVICE_NAME}"
 if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
   INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
   AUTH_FLAG="--no-allow-unauthenticated"
+elif [[ "${ENABLE_VPC_INTERNAL:-false}" == "true" ]]; then
+  INGRESS_FLAG="--ingress internal"
+  AUTH_FLAG="--no-allow-unauthenticated"
 else
   INGRESS_FLAG="--ingress all"
   AUTH_FLAG="--no-allow-unauthenticated"

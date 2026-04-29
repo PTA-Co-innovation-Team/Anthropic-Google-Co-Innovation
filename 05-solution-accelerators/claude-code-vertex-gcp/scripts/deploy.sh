@@ -125,6 +125,22 @@ ENABLE_VM="$(_ask_bool "Deploy dev VM (costs money)?" false)"
 ENABLE_OBS="$(_ask_bool "Install observability (log sink + BQ)?" true)"
 ENABLE_GLB="$(_ask_bool "Deploy Global Load Balancer? (enables access-token auth, ~\$18/month)" false)"
 
+ENABLE_VPC_INTERNAL="false"
+if [[ "${ENABLE_GLB}" == "false" ]]; then
+  ENABLE_VPC_INTERNAL="$(_ask_bool "Restrict ingress to VPC-internal only? (developers access via dev VM + IAP SSH)" false)"
+fi
+
+if [[ "${ENABLE_VPC_INTERNAL}" == "true" ]]; then
+  echo "" >&2
+  echo "VPC-internal mode: Cloud Run services are only reachable from within the VPC." >&2
+  echo "Developer access is via the dev VM (accessed through IAP SSH tunneling)." >&2
+  echo "No VPN is required." >&2
+  echo "" >&2
+  if [[ "${ENABLE_VM}" == "false" ]]; then
+    ENABLE_VM="$(_ask_bool "Dev VM is recommended for VPC-internal mode (IAP SSH access). Deploy it?" true)"
+  fi
+fi
+
 GLB_DOMAIN=""
 GLB_CERT_MODE=""
 IAP_SUPPORT_EMAIL=""
@@ -205,6 +221,9 @@ glb:
   cert_mode: "${GLB_CERT_MODE}"
   iap_support_email: "${IAP_SUPPORT_EMAIL}"
 
+vpc:
+  internal_ingress: ${ENABLE_VPC_INTERNAL}
+
 access:
   allowed_principals:
 ${principals_yaml}
@@ -227,9 +246,15 @@ fi
 
 # ----- Export env for component scripts -------------------------------------
 export PROJECT_ID REGION FALLBACK_REGION
-export ENABLE_LLM ENABLE_MCP ENABLE_PORTAL ENABLE_VM ENABLE_OBS ENABLE_GLB
+export ENABLE_LLM ENABLE_MCP ENABLE_PORTAL ENABLE_VM ENABLE_OBS ENABLE_GLB ENABLE_VPC_INTERNAL
 export GLB_DOMAIN GLB_CERT_MODE IAP_SUPPORT_EMAIL
 export PRINCIPALS="${PRINCIPALS_INPUT}"
+
+# ----- Validate mutual exclusion --------------------------------------------
+if [[ "${ENABLE_GLB}" == "true" && "${ENABLE_VPC_INTERNAL}" == "true" ]]; then
+  log_error "ENABLE_GLB and ENABLE_VPC_INTERNAL are mutually exclusive"
+  exit 1
+fi
 
 # ----- Run component scripts ------------------------------------------------
 log_step "setting gcloud project"

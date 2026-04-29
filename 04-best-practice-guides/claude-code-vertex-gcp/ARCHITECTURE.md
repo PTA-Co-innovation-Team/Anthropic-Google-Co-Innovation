@@ -93,7 +93,10 @@ allowlist. Token validation is always on (`ENABLE_TOKEN_VALIDATION=1`).
 
 **Ingress:** `all` in standard mode (developer laptops reach the service
 directly; token validation is the security boundary). In GLB mode,
-`internal-and-cloud-load-balancing` (only the GLB can reach it).
+`internal-and-cloud-load-balancing` (only the GLB can reach it). In VPC
+internal mode, `internal` (only clients within the VPC can reach it —
+developers access via the dev VM using IAP SSH tunneling; VPN and Cloud
+Interconnect are available as optional advanced configurations).
 
 **Path normalization:** Claude Code omits the `/v1/` prefix from URL paths
 when `ANTHROPIC_VERTEX_BASE_URL` is set (e.g. `/projects/P/locations/R/...`
@@ -140,6 +143,8 @@ are self-service.
 enforced on the GLB backend — only Google identities in
 `access.allowed_principals` can open the page. In **standard mode** (no GLB),
 `--no-allow-unauthenticated` with `roles/run.invoker` grants per principal.
+In **VPC internal mode**, `internal` — the portal is only reachable from
+within the VPC.
 
 ### 4. Dev VM (GCE, optional, off by default)
 
@@ -212,11 +217,13 @@ default.
 ### No public IPs
 
 - Cloud Run gateways use `ingress=all` in standard mode (token validation
-  is the security boundary) or `internal-and-cloud-load-balancing` in GLB
-  mode.
+  is the security boundary), `internal-and-cloud-load-balancing` in GLB
+  mode, or `internal` in VPC internal mode (the strictest option — services
+  are only reachable from within the VPC).
 - The dev VM is created with `--no-address`.
-- Developer access is via ADC-authenticated requests (standard mode) or
-  IAP (tunnel for SSH, IAP-protected HTTPS LB for web).
+- Developer access is via ADC-authenticated requests (standard mode),
+  IAP (tunnel for SSH, IAP-protected HTTPS LB for web in GLB mode), or
+  dev VM via IAP SSH tunneling (VPC internal mode; no VPN required).
 
 ### Deployment-path compatibility (TF vs. gcloud scripts)
 

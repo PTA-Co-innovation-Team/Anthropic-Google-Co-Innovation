@@ -95,6 +95,26 @@ resource "google_vpc_access_connector" "connector" {
   max_throughput = 300
 }
 
+# --- Firewall: allow VPN clients (optional, advanced) -----------------------
+# Most deployments do not need this — IAP (via GLB or dev VM SSH) provides
+# developer access without VPN. This rule is for organizations that also
+# run a Cloud VPN or Cloud Interconnect alongside IAP.
+resource "google_compute_firewall" "allow_vpn_to_services" {
+  count       = var.enable_vpc_internal && length(var.vpn_client_cidrs) > 0 ? 1 : 0
+  name        = "allow-vpn-to-services"
+  project     = var.project_id
+  network     = google_compute_network.vpc.name
+  description = "Optional: allow VPN clients to reach Cloud Run services. Most deployments use IAP instead."
+
+  source_ranges = var.vpn_client_cidrs
+  direction     = "INGRESS"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+}
+
 # --- Private Service Connect (optional) -------------------------------------
 # PSC here creates a private IP inside the VPC that resolves to the
 # googleapis.com bundle. Useful only when on-prem networks connected

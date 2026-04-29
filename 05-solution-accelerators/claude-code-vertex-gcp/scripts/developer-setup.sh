@@ -205,29 +205,61 @@ fi
 
 # --- Connection smoke test --------------------------------------------------
 log_step "connection smoke test"
-# Use an ADC access token — this is the same token type Claude Code sends.
-# Cloud Run's IAM check is disabled (--no-invoker-iam-check); the gateway's
-# app-level token_validation middleware validates the token instead.
-TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null \
-         || gcloud auth print-identity-token --audiences="${LLM_GATEWAY_URL%/}" 2>/dev/null \
-         || true)"
-# Use -k for IP-based URLs (GLB with self-signed cert).
-_CURL_K=""
-if [[ "${LLM_GATEWAY_URL}" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-  _CURL_K="-k"
-fi
-if [[ -n "${TOKEN}" ]]; then
-  status="$(curl -sS ${_CURL_K} -o /dev/null -w '%{http_code}' --connect-timeout 10 \
-              -H "Authorization: Bearer ${TOKEN}" \
-              "${LLM_GATEWAY_URL%/}/health" || echo "000")"
-  case "${status}" in
-    200) log_info "gateway /health returned 200 — you're all set." ;;
-    401|403) log_warn "gateway returned ${status} — you likely need roles/run.invoker. Ask your admin." ;;
-    000) log_warn "could not reach gateway (network / VPN issue?)" ;;
-    *) log_warn "unexpected status from gateway: ${status}" ;;
-  esac
-else
-  log_warn "no credentials available; couldn't smoke-test the gateway"
+
+# Quick reachability probe (no auth). Internal-only services return
+# connection errors from outside the VPC.
+_SKIP_SMOKE=false
+_probe="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 \
+            "${LLM_GATEWAY_URL%/}/healthz" 2>/dev/null || echo "000")"
+if [[ "${_probe}" == "000" ]]; then
+  log_warn "cannot reach ${LLM_GATEWAY_URL} — service uses internal-only ingress"
+  log_warn ""
+  log_warn "This is expected for VPC-internal deployments. Two options:"
+  log_warn "  1. If a GLB is deployed, re-run with the GLB URL instead:"
+  log_warn "       LLM_GATEWAY_URL=<glb-url> ./scripts/developer-setup.sh"
+  _glb_fallback="$(resolve_glb_url "${PROJECT_ID}" 2>/dev/null || echo "")"
+  if [[ -n "${_glb_fallback}" && "${_glb_fallback}" != "${LLM_GATEWAY_URL}" ]]; then
+    log_info "     GLB detected: ${_glb_fallback}"
+  fi
+  log_warn "  2. SSH into the dev VM via IAP and run Claude Code from there:"
+  log_warn "       gcloud compute ssh --tunnel-through-iap --project=${PROJECT_ID} claude-code-dev-shared"
+  log_warn ""
+  log_warn "No VPN required — IAP provides secure access."
+  log_warn "skipping smoke test (service unreachable from this network)"
+  _SKIP_SMOKE=true
 fi
 
-log_info "done. Start Claude Code with: claude"
+if [[ "${_SKIP_SMOKE}" == "false" ]]; then
+  # Use an ADC access token — this is the same token type Claude Code sends.
+  # Cloud Run's IAM check is disabled (--no-invoker-iam-check); the gateway's
+  # app-level token_validation middleware validates the token instead.
+  TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null \
+           || gcloud auth print-identity-token --audiences="${LLM_GATEWAY_URL%/}" 2>/dev/null \
+           || true)"
+  # Use -k for IP-based URLs (GLB with self-signed cert).
+  _CURL_K=""
+  if [[ "${LLM_GATEWAY_URL}" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    _CURL_K="-k"
+  fi
+  if [[ -n "${TOKEN}" ]]; then
+    status="$(curl -sS ${_CURL_K} -o /dev/null -w '%{http_code}' --connect-timeout 10 \
+                -H "Authorization: Bearer ${TOKEN}" \
+                "${LLM_GATEWAY_URL%/}/health" || echo "000")"
+    case "${status}" in
+      200) log_info "smoke test passed — gateway /health returned 200" ;;
+      401|403) log_warn "gateway returned ${status} — your identity may not be in ALLOWED_PRINCIPALS."
+               log_warn "ask your admin to add your principal to the gateway's allowed list." ;;
+      000) log_warn "could not reach gateway (service may use internal-only ingress — access via GLB or dev VM)" ;;
+      *) log_warn "unexpected status from gateway: ${status}" ;;
+    esac
+  else
+    log_warn "no credentials available; couldn't smoke-test the gateway"
+  fi
+fi
+
+log_step "setup complete"
+log_info "settings written to ${SETTINGS_FILE}"
+if [[ "${_SKIP_SMOKE}" == "true" ]]; then
+  log_info "smoke test skipped (gateway unreachable from this network — see guidance above)"
+fi
+log_info "start Claude Code with: claude"

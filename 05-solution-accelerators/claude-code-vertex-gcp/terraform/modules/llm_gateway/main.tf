@@ -58,7 +58,11 @@ resource "google_cloud_run_v2_service" "gateway" {
   location = var.region
   labels   = var.labels
 
-  ingress              = var.enable_glb ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
+  ingress = (
+    var.enable_glb          ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" :
+    var.enable_vpc_internal ? "INGRESS_TRAFFIC_INTERNAL_ONLY" :
+                              "INGRESS_TRAFFIC_ALL"
+  )
   invoker_iam_disabled = true
 
   template {
@@ -72,7 +76,7 @@ resource "google_cloud_run_v2_service" "gateway" {
     # Pipe egress through the VPC connector when enabled, so Vertex
     # traffic uses Private Google Access.
     dynamic "vpc_access" {
-      for_each = var.use_vpc_connector && var.vpc_connector_name != "" ? [1] : []
+      for_each = (var.use_vpc_connector || var.enable_vpc_internal) && var.vpc_connector_name != "" ? [1] : []
       content {
         connector = "projects/${var.project_id}/locations/${var.region}/connectors/${var.vpc_connector_name}"
         egress    = "PRIVATE_RANGES_ONLY"
