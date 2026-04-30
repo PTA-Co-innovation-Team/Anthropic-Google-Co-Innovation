@@ -152,10 +152,4 @@ deal-desk-agent/
   (re-run `gcloud compute instances update-container ... --container-env=AGENT_SECRET=...`)
 - Nuclear option: Play the backup video
 
-## Future Roadmap
 
-- Gemini Enterprise: Set MODEL_PROVIDER=gemini in .env to swap all agents
-- Agent Gallery: Register via Agent Engine for discovery
-- GCP Marketplace: Package as a deployable solution
-- LoopAgent: Add quality review loop around synthesis
-- MCP Toolbox: Replace direct BigQuery client with MCP
