@@ -4,7 +4,7 @@
 
 # Anthropic + Google Cloud: AI Co-Innovation Space
 
-Welcome to the official co-innovation repository for the **Anthropic + Google Cloud partnership**. This space is designed to showcase the deep integration between Anthropic's **Claude** family of frontier models and Google Cloud's secure, scalable AI infrastructure — including **Vertex AI**, **Agentspace**, **BigQuery**, and the **Agent Development Kit (ADK)**.
+Welcome to the co-innovation repository for the **Anthropic + Google Cloud partnership at Google**. This space is designed to showcase the deep integration between Anthropic's **Claude** family of frontier models and Google Cloud's secure, scalable AI infrastructure — including **Gemini Enterprise Agent Platform**, **Google Cloud Services**, **Agent Development Kit (ADK)** etc.
 
 ---
 
