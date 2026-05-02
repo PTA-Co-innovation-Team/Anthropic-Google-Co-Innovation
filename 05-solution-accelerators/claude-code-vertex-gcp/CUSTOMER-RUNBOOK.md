@@ -133,6 +133,16 @@ Open the URL in your browser as any user listed in
 - Error-rate trend
 - p50 / p95 / p99 latency to Vertex
 - A live feed of the most recent 50 requests (timestamp, caller, model, status, latency)
+- **Tokens by caller** — input / output / total tokens consumed per identity, last N hours. Surfaces only after `TOKEN_LIMIT_PER_MIN` is set (the cap is what makes the gateway emit the underlying `token_debit` log entries).
+- **Token burn-rate** — minute-bucketed total token throughput project-wide. Useful as a leading indicator before per-caller caps fire.
+- **Token-limit rejections** — counts of requests rejected by the per-caller token cap, broken down by caller. A non-zero value here means a caller's cap is too tight (or they are a heavy user worth a conversation).
+
+> If you also enable the Settings tab (set `EDITORS=you@your.com,...` on
+> the dashboard service), an editor pencil appears next to the six
+> traffic-policy env vars and you can flip `RATE_LIMIT_PER_MIN`,
+> `TOKEN_LIMIT_PER_MIN`, `ALLOWED_MODELS`, etc. from the browser.
+> Each save rolls one new `llm-gateway` revision and emits a
+> `policy_change` audit log entry naming the editor and the diff.
 
 The page auto-refreshes every 60 seconds. **First data appears ~60s
 after the first gateway request flows through Cloud Logging into

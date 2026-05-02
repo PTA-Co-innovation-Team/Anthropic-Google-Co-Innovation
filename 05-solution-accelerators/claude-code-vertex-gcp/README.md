@@ -84,7 +84,7 @@ When the installer finishes, your GCP project will contain:
 | **LLM Gateway** | Cloud Run service — small FastAPI reverse proxy | Single point for auth, logging, header sanitation, rate limiting, and model policy in front of Vertex AI |
 | **MCP Gateway** | Cloud Run service — FastMCP over Streamable HTTP | Place to host your organization's custom MCP tools (ships with four examples) |
 | **Dev Portal** | Cloud Run static site | Self-service setup instructions for your developers |
-| **Admin Dashboard** | Cloud Run service — Chart.js + BigQuery | Real-time usage panels, optionally a Settings tab for editing traffic policy from the browser |
+| **Admin Dashboard** | Cloud Run service — Chart.js + BigQuery | Real-time usage panels (requests-per-day, by-model, top-callers, error-rate, latency-percentiles, recent-requests) plus three token-economics panels (`tokens-by-caller`, `token-burn-rate`, `token-limit-rejections`) and an optional Settings tab for editing traffic policy from the browser |
 | **Dev VM** *(optional, off by default)* | GCE VM with no public IP, accessed via IAP TCP tunneling | Cloud dev environment for teams that don't want local installs |
 | **Observability** | Cloud Logging sink → BigQuery dataset `claude_code_logs` | Where the structured logs land; the dashboard reads from here |
 

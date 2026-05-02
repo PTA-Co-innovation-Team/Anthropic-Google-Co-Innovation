@@ -135,6 +135,43 @@ rejects — you want this at zero.)
 - Metric: **Record count**
 - Filter: `jsonPayload.betas_stripped` is not null and not `[]`.
 
+> **Note.** The next three panels surface data the gateway only emits
+> when the per-caller token cap is enabled (`TOKEN_LIMIT_PER_MIN` set
+> on `llm-gateway`). The Admin Dashboard renders the same three
+> panels with no extra setup.
+
+### Panel G — Tokens by caller
+
+- Chart type: **Table**
+- Filter (data source level): `jsonPayload.message` = `token_debit`
+- Dimension: `jsonPayload.caller`
+- Metrics: SUM of `jsonPayload.input_tokens`, `jsonPayload.output_tokens`, `jsonPayload.total_tokens`; COUNT of records (calls).
+- Sort: total_tokens descending.
+
+### Panel H — Token burn-rate
+
+- Chart type: **Time series**
+- Filter: `jsonPayload.message` = `token_debit`
+- Date dimension: `timestamp` (granularity: minute)
+- Metric: SUM of `jsonPayload.total_tokens`
+
+### Panel I — Token-limit rejections
+
+- Chart type: **Bar chart**
+- Filter: `jsonPayload.message` = `token_limited`
+- Dimension: `jsonPayload.caller`
+- Metric: **Record count** (label as "rejection_count")
+- Sort: rejection_count descending.
+
+### Panel J — Settings-tab audit trail (optional)
+
+(Only relevant if you've enabled the Settings tab on the dashboard.)
+
+- Chart type: **Table**
+- Filter: `resource.labels.service_name` = `admin-dashboard` AND `jsonPayload.message` = `policy_change`
+- Dimensions: `timestamp`, `jsonPayload.editor`, `jsonPayload.diff`
+- Sort: timestamp descending.
+
 ---
 
 ## 4. Save + share
