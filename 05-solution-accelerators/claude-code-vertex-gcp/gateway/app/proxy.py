@@ -17,6 +17,7 @@ when ``CLAUDE_CODE_USE_VERTEX=1``, and we pass it through unchanged.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -26,6 +27,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
+from . import model_policy, rate_limit, token_limit
 from .auth import CallerIdentity, extract_caller_identity, get_vertex_access_token
 from .headers import sanitize_request_headers
 from .logging_config import get_logger
@@ -160,6 +162,138 @@ async def _iter_upstream(response: httpx.Response) -> AsyncIterator[bytes]:
         yield chunk
 
 
+def _extract_usage_from_body(body: bytes) -> tuple[Optional[int], Optional[int]]:
+    """Pull (input_tokens, output_tokens) out of a Vertex response body.
+
+    Vertex returns two response shapes:
+
+    * **Non-streaming JSON** (rawPredict): a single JSON object with a
+      top-level ``usage`` field — ``{"input_tokens": ..., "output_tokens": ...}``.
+    * **Streaming SSE** (streamRawPredict): a stream of ``data: {...}``
+      lines. The final ``message_delta`` event carries
+      ``usage`` with the cumulative output count and ``message_start``
+      carries ``input_tokens``. We aggregate.
+
+    Vertex frequently gzip-encodes the response body even when the
+    gateway sends no Accept-Encoding header. ``aiter_raw()`` yields
+    the on-wire gzip bytes, so we must decompress here before parsing.
+
+    Returns ``(None, None)`` if we can't parse — the gateway must not
+    crash because of an unexpected response shape; we just skip the
+    debit and rely on operator alerting.
+    """
+    if not body:
+        return None, None
+
+    # Detect gzip via magic bytes (0x1f 0x8b) and decompress.
+    if len(body) >= 2 and body[0] == 0x1F and body[1] == 0x8B:
+        try:
+            import gzip
+            body = gzip.decompress(body)
+        except Exception:
+            log.debug("usage_gzip_decode_failed", exc_info=True)
+            return None, None
+
+    # Try non-streaming JSON first (fastest path).
+    try:
+        obj = json.loads(body)
+        usage = obj.get("usage") if isinstance(obj, dict) else None
+        if isinstance(usage, dict):
+            return (
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+            )
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        pass
+
+    # Streaming SSE — parse "data: {...}" lines, look for usage in any.
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    try:
+        text = body.decode("utf-8", errors="replace")
+        for line in text.splitlines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            # message_start: {"message": {"usage": {"input_tokens": N}}}
+            msg = event.get("message")
+            if isinstance(msg, dict):
+                u = msg.get("usage")
+                if isinstance(u, dict):
+                    if input_tokens is None and "input_tokens" in u:
+                        input_tokens = u["input_tokens"]
+                    if "output_tokens" in u:
+                        output_tokens = u["output_tokens"]
+            # message_delta: {"usage": {"output_tokens": M}} (cumulative)
+            u = event.get("usage")
+            if isinstance(u, dict):
+                if input_tokens is None and "input_tokens" in u:
+                    input_tokens = u["input_tokens"]
+                if "output_tokens" in u:
+                    output_tokens = u["output_tokens"]
+    except Exception:
+        log.debug("usage_parse_failed", exc_info=True)
+
+    return input_tokens, output_tokens
+
+
+async def _tee_and_debit(
+    response: httpx.Response,
+    caller_email: str,
+) -> AsyncIterator[bytes]:
+    """Stream the upstream response to the client AND capture bytes for usage.
+
+    The capture buffer is only used to parse Vertex's ``usage`` field
+    after the stream completes. We do not delay the client; bytes are
+    yielded as they arrive. The post-stream debit is best-effort — if
+    the parse fails or the response was truncated, we skip the debit
+    rather than risk over- or under-charging.
+
+    Memory: capped buffer (we keep at most ~256KB). Larger responses
+    typically still have ``usage`` in the message_delta near the
+    beginning of the stream; for non-streaming JSON the body is
+    bounded by Vertex's per-call response cap (well under 256KB).
+    """
+    captured = bytearray()
+    # 1 MB is enough for the largest Vertex responses we've seen in practice
+    # (typically under 200KB even gzip-decompressed). Bounded to protect
+    # memory at scale; truncated gzip will fail the parse and skip the debit
+    # — acceptable degradation.
+    cap = 1024 * 1024
+    try:
+        async for chunk in response.aiter_raw():
+            if len(captured) < cap:
+                # Bound buffer growth so a streamed multi-MB response
+                # doesn't blow memory just to capture usage tokens.
+                captured.extend(chunk[: cap - len(captured)])
+            yield chunk
+    finally:
+        # Stream done (success or client disconnect). Best-effort debit.
+        if token_limit.is_enabled() and caller_email:
+            try:
+                in_tok, out_tok = _extract_usage_from_body(bytes(captured))
+                total = (in_tok or 0) + (out_tok or 0)
+                if total > 0:
+                    token_limit.debit_post_response(caller_email, total)
+                    log.info(
+                        "token_debit",
+                        extra={
+                            "caller": caller_email,
+                            "input_tokens": in_tok,
+                            "output_tokens": out_tok,
+                            "total_tokens": total,
+                        },
+                    )
+            except Exception:
+                log.warning("token_debit_failed", exc_info=True)
+
+
 async def proxy_request(
     request: Request,
     client: httpx.AsyncClient,
@@ -184,8 +318,65 @@ async def proxy_request(
             email=request.state.caller_email,
             source=getattr(request.state, "caller_source", "token_validation"),
         )
-    model = _extract_model(request.url.path)
-    region = _extract_region_from_path(request.url.path)
+
+    # --- Per-caller rate limiting (off unless RATE_LIMIT_PER_MIN > 0) ------
+    # Runs immediately after caller identity is known so 429s are emitted
+    # without paying the cost of upstream URL construction or body reads.
+    retry_after = rate_limit.check_and_consume(caller.email or "")
+    if retry_after is not None:
+        log.warning(
+            "rate_limited",
+            extra={"caller": caller.email, "retry_after_s": int(retry_after)},
+        )
+        return StreamingResponse(
+            iter([b'{"error":"rate_limited","detail":"too many requests"}']),
+            status_code=429,
+            headers={"Retry-After": str(int(retry_after)),
+                     "Content-Type": "application/json"},
+        )
+
+    # --- Per-caller token cap pre-check (off unless TOKEN_LIMIT_PER_MIN > 0) ---
+    # We need the body for the input-token estimate, so this is the
+    # earliest place we can check. Read body once, reuse below.
+    body = await request.body()
+    if token_limit.is_enabled():
+        est_input = token_limit.estimate_input_tokens_from_body(body)
+        token_retry = token_limit.check_pre_charge(caller.email or "", est_input)
+        if token_retry is not None:
+            log.warning(
+                "token_limited",
+                extra={
+                    "caller": caller.email,
+                    "estimated_input_tokens": est_input,
+                    "retry_after_s": int(token_retry),
+                },
+            )
+            return StreamingResponse(
+                iter([b'{"error":"token_limited","detail":"per-caller token cap exceeded"}']),
+                status_code=429,
+                headers={"Retry-After": str(int(token_retry)),
+                         "Content-Type": "application/json"},
+            )
+
+    # --- Model policy: rewrite first, then allowlist -----------------------
+    inbound_path = request.url.path
+    rewritten_path, rewritten_to = model_policy.apply_rewrite(inbound_path)
+    effective_path = rewritten_path
+    model = _extract_model(effective_path)
+    region = _extract_region_from_path(effective_path)
+
+    if not model_policy.is_model_allowed(model):
+        log.warning(
+            "model_not_allowed",
+            extra={"caller": caller.email, "model": model},
+        )
+        return StreamingResponse(
+            iter([
+                f'{{"error":"model_not_allowed","detail":"model {model} is not in ALLOWED_MODELS"}}'.encode()
+            ]),
+            status_code=403,
+            headers={"Content-Type": "application/json"},
+        )
 
     # --- Sanitize headers and add gateway auth -----------------------------
     cleaned, stripped = sanitize_request_headers(
@@ -195,13 +386,11 @@ async def proxy_request(
     cleaned["Authorization"] = f"Bearer {token}"
 
     # --- Build upstream URL ------------------------------------------------
-    url = build_upstream_url(request.url.path, request.url.query)
+    url = build_upstream_url(effective_path, request.url.query)
 
     # --- Read body ---------------------------------------------------------
-    # Claude Code requests are JSON and usually small; we read the whole
-    # body into memory. If we ever need to handle multi-megabyte uploads
-    # we would switch to streaming the request body instead.
-    body = await request.body()
+    # Body was already read above (the token-cap block reads it
+    # unconditionally so it's always available here).
 
     # --- Forward -----------------------------------------------------------
     # httpx ``stream`` returns an async context manager around a response
@@ -231,6 +420,7 @@ async def proxy_request(
             "betas_stripped": [h for h in stripped if h.startswith("anthropic-beta")],
             "cloud_run_region": _CLOUD_RUN_REGION,
             "project_id": _VERTEX_PROJECT_ID,
+            "model_rewritten_to": rewritten_to,
         },
     )
 
@@ -244,8 +434,17 @@ async def proxy_request(
         if k.lower() not in {"transfer-encoding", "connection", "content-length"}
     }
 
+    # Use the tee-and-debit iterator only when token-cap is on AND the
+    # upstream returned 2xx. Non-2xx responses don't have usage data
+    # to debit, and we want to avoid the buffering overhead when the
+    # cap is disabled.
+    if token_limit.is_enabled() and 200 <= upstream.status_code < 300:
+        body_iter = _tee_and_debit(upstream, caller.email or "")
+    else:
+        body_iter = _iter_upstream(upstream)
+
     return StreamingResponse(
-        _iter_upstream(upstream),
+        body_iter,
         status_code=upstream.status_code,
         headers=response_headers,
         background=_make_close_task(upstream),

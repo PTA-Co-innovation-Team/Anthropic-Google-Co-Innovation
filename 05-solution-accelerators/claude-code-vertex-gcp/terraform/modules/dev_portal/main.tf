@@ -24,11 +24,7 @@ resource "google_cloud_run_v2_service" "portal" {
   location = var.region
   labels   = var.labels
 
-  ingress = (
-    var.enable_glb          ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" :
-    var.enable_vpc_internal ? "INGRESS_TRAFFIC_INTERNAL_ONLY" :
-                              "INGRESS_TRAFFIC_ALL"
-  )
+  ingress = var.enable_glb ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
 
   template {
     service_account = google_service_account.sa.email
@@ -72,7 +68,7 @@ resource "google_cloud_run_v2_service" "portal" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "invokers" {
-  for_each = (var.enable_glb || var.enable_vpc_internal) ? toset([]) : toset(var.allowed_principals)
+  for_each = var.enable_glb ? toset([]) : toset(var.allowed_principals)
   project  = var.project_id
   location = var.region
   name     = google_cloud_run_v2_service.portal.name

@@ -70,8 +70,12 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" \
   wait_for_sa "${SA_EMAIL}"
 fi
 
-# --- SA IAM: Vertex caller + log writer + SA viewer -------------------------
-log_step "grant SA roles"
+# --- SA IAM: Vertex caller + log writer + SA-viewer (for SA-token lookup) ---
+# iam.serviceAccountViewer is needed by the token_validation middleware so it
+# can resolve SA email from `azp` (uniqueId) when callers present a metadata-
+# server access token (e.g. Claude Code running on a GCE Dev VM). Without it,
+# requests from VMs are rejected 401 invalid_token.
+log_step "grant SA roles/aiplatform.user, logging.logWriter, iam.serviceAccountViewer"
 for role in roles/aiplatform.user roles/logging.logWriter roles/iam.serviceAccountViewer; do
   run_cmd gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" --role="${role}" --condition=None --quiet
@@ -94,13 +98,23 @@ fi
 
 if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
   INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
-elif [[ "${ENABLE_VPC_INTERNAL:-false}" == "true" ]]; then
-  INGRESS_FLAG="--ingress internal"
 else
   INGRESS_FLAG="--ingress all"
 fi
 
+# Optional traffic-policy env vars. All default to empty/unset, which is
+# the disabled state. Operators turn them on by exporting before running:
+#   RATE_LIMIT_PER_MIN=120  (per-caller cap; bursts allowed up to RATE_LIMIT_BURST)
+#   RATE_LIMIT_BURST=240    (default = RATE_LIMIT_PER_MIN if not set)
+#   ALLOWED_MODELS=claude-sonnet-4-6,claude-haiku-4-5  (csv allowlist)
+#   MODEL_REWRITE=claude-opus-4-6=claude-sonnet-4-6   (force migration)
 ENV_VARS="^;^GOOGLE_CLOUD_PROJECT=${PROJECT_ID};VERTEX_DEFAULT_REGION=${REGION};ENABLE_TOKEN_VALIDATION=1;ALLOWED_PRINCIPALS=${ALLOWED}"
+[[ -n "${RATE_LIMIT_PER_MIN:-}" ]] && ENV_VARS="${ENV_VARS};RATE_LIMIT_PER_MIN=${RATE_LIMIT_PER_MIN}"
+[[ -n "${RATE_LIMIT_BURST:-}" ]] && ENV_VARS="${ENV_VARS};RATE_LIMIT_BURST=${RATE_LIMIT_BURST}"
+[[ -n "${TOKEN_LIMIT_PER_MIN:-}" ]] && ENV_VARS="${ENV_VARS};TOKEN_LIMIT_PER_MIN=${TOKEN_LIMIT_PER_MIN}"
+[[ -n "${TOKEN_LIMIT_BURST:-}" ]] && ENV_VARS="${ENV_VARS};TOKEN_LIMIT_BURST=${TOKEN_LIMIT_BURST}"
+[[ -n "${ALLOWED_MODELS:-}" ]] && ENV_VARS="${ENV_VARS};ALLOWED_MODELS=${ALLOWED_MODELS}"
+[[ -n "${MODEL_REWRITE:-}" ]] && ENV_VARS="${ENV_VARS};MODEL_REWRITE=${MODEL_REWRITE}"
 
 run_cmd gcloud run deploy "${SERVICE_NAME}" \
   --project "${PROJECT_ID}" \

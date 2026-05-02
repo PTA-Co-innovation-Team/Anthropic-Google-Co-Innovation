@@ -81,6 +81,27 @@ resource "google_compute_firewall" "allow_iap_web" {
   target_tags = ["claude-code-dev-vm"]
 }
 
+# --- Cloud Router + NAT (for the dev VM's outbound internet egress) --------
+# The dev VM has no public IP; without NAT, the startup script's apt-get and
+# npm install calls fail with "network is unreachable". Cost: ~$1/day when
+# the VM is running; auto-shutdown bounds it.
+resource "google_compute_router" "nat" {
+  name        = "claude-code-nat-router"
+  project     = var.project_id
+  region      = var.region
+  network     = google_compute_network.vpc.id
+  description = "Cloud Router supporting the NAT used by the dev VM for outbound internet."
+}
+
+resource "google_compute_router_nat" "nat" {
+  name                               = "claude-code-nat"
+  project                            = var.project_id
+  region                             = var.region
+  router                             = google_compute_router.nat.name
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+}
+
 # --- Serverless VPC Connector (optional) ------------------------------------
 resource "google_vpc_access_connector" "connector" {
   count         = var.use_vpc_connector ? 1 : 0
@@ -93,49 +114,6 @@ resource "google_vpc_access_connector" "connector" {
   # maximum throughput controls instance counts.
   min_throughput = 200
   max_throughput = 300
-}
-
-# --- Cloud NAT (optional) ---------------------------------------------------
-# Required when workloads with no public IP need to reach non-Google
-# internet hosts (e.g. the dev VM startup script fetches Node.js from
-# deb.nodesource.com and Claude Code from registry.npmjs.org).
-# Cloud NAT provides outbound-only NAT — no inbound ports are opened.
-resource "google_compute_router" "router" {
-  count   = var.enable_cloud_nat ? 1 : 0
-  name    = "claude-code-router"
-  project = var.project_id
-  region  = var.region
-  network = google_compute_network.vpc.id
-}
-
-resource "google_compute_router_nat" "nat" {
-  count                              = var.enable_cloud_nat ? 1 : 0
-  name                               = "claude-code-nat"
-  router                             = google_compute_router.router[0].name
-  project                            = var.project_id
-  region                             = var.region
-  nat_ip_allocate_option             = "AUTO_ONLY"
-  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
-}
-
-# --- Firewall: allow VPN clients (optional, advanced) -----------------------
-# Most deployments do not need this — IAP (via GLB or dev VM SSH) provides
-# developer access without VPN. This rule is for organizations that also
-# run a Cloud VPN or Cloud Interconnect alongside IAP.
-resource "google_compute_firewall" "allow_vpn_to_services" {
-  count       = var.enable_vpc_internal && length(var.vpn_client_cidrs) > 0 ? 1 : 0
-  name        = "allow-vpn-to-services"
-  project     = var.project_id
-  network     = google_compute_network.vpc.name
-  description = "Optional: allow VPN clients to reach Cloud Run services. Most deployments use IAP instead."
-
-  source_ranges = var.vpn_client_cidrs
-  direction     = "INGRESS"
-
-  allow {
-    protocol = "tcp"
-    ports    = ["443"]
-  }
 }
 
 # --- Private Service Connect (optional) -------------------------------------

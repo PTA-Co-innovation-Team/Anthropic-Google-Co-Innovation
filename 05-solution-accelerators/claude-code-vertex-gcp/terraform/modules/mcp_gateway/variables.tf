@@ -48,9 +48,3 @@ variable "enable_glb" {
   type        = bool
   default     = false
 }
-
-variable "enable_vpc_internal" {
-  description = "When true, restrict ingress to VPC-internal only (developers access via dev VM + IAP SSH tunneling; no VPN required)."
-  type        = bool
-  default     = false
-}

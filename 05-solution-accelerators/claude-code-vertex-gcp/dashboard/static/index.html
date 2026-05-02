@@ -13,8 +13,58 @@
       <h1>Claude Code Admin Dashboard</h1>
       <p class="subtitle">Gateway usage, model distribution, caller activity, and latency</p>
       <p class="refresh-info">Auto-refreshes every 60s &mdash; Last updated: <span id="last-updated">loading...</span></p>
+      <div class="tabs">
+        <button class="tab active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
+        <button class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
+      </div>
     </header>
 
+    <!-- ============== Settings tab ============================================ -->
+    <div id="tab-settings" class="tab-pane" style="display:none">
+      <div class="card full-width">
+        <h2>Traffic policy &mdash; LLM Gateway</h2>
+        <p class="muted" id="settings-status">Loading current values…</p>
+        <p class="muted" id="settings-editor"></p>
+        <form id="policy-form" onsubmit="return submitPolicy(event)">
+          <fieldset>
+            <legend>Per-caller rate limit</legend>
+            <label>RATE_LIMIT_PER_MIN <small>(requests / min)</small>
+              <input type="text" name="RATE_LIMIT_PER_MIN" placeholder="0 = disabled" />
+            </label>
+            <label>RATE_LIMIT_BURST <small>(max bucket size)</small>
+              <input type="text" name="RATE_LIMIT_BURST" placeholder="defaults to PER_MIN" />
+            </label>
+          </fieldset>
+          <fieldset>
+            <legend>Per-caller token cap (input + output)</legend>
+            <label>TOKEN_LIMIT_PER_MIN <small>(tokens / min)</small>
+              <input type="text" name="TOKEN_LIMIT_PER_MIN" placeholder="0 = disabled" />
+            </label>
+            <label>TOKEN_LIMIT_BURST <small>(max bucket size)</small>
+              <input type="text" name="TOKEN_LIMIT_BURST" placeholder="defaults to PER_MIN" />
+            </label>
+          </fieldset>
+          <fieldset>
+            <legend>Model policy</legend>
+            <label>ALLOWED_MODELS <small>(CSV; empty = no allowlist)</small>
+              <input type="text" name="ALLOWED_MODELS" placeholder="claude-sonnet-4-6,claude-haiku-4-5" />
+            </label>
+            <label>MODEL_REWRITE <small>(CSV of from=to; empty = no rewrites)</small>
+              <input type="text" name="MODEL_REWRITE" placeholder="claude-opus-4-6=claude-sonnet-4-6" />
+            </label>
+          </fieldset>
+          <p class="muted">
+            Leave a field blank to remove that env var. Saving rolls a new
+            Cloud Run revision (~30s). Changes are audit-logged.
+          </p>
+          <button type="submit" id="save-btn" disabled>Save &amp; Deploy New Revision</button>
+          <span id="save-result" class="muted"></span>
+        </form>
+      </div>
+    </div>
+
+    <!-- ============== Overview tab =========================================== -->
+    <div id="tab-overview" class="tab-pane">
     <div class="dashboard-grid">
       <!-- Requests per Day -->
       <div class="card">
@@ -78,7 +128,33 @@
           </table>
         </div>
       </div>
+
+      <!-- Token Consumption (L3 panels) -->
+      <div class="card full-width">
+        <h2>Tokens by Caller (last 24h)</h2>
+        <div class="empty-state" id="tbc-empty" style="display:none">No token-debit entries yet — token cap may be off, or no requests have flowed since enabling.</div>
+        <table id="table-tbc" style="display:none">
+          <thead><tr><th>Caller</th><th>Input</th><th>Output</th><th>Total</th><th>Requests</th></tr></thead>
+          <tbody id="tbc-body"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Token Burn Rate (last 24h)</h2>
+        <div class="empty-state" id="tbr-empty" style="display:none">No token-debit data yet.</div>
+        <canvas id="chart-tbr"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Token-Limit Rejections</h2>
+        <div class="empty-state" id="tlr-empty" style="display:none">Nobody has hit the token cap in the last 24h. (Or the cap is off.)</div>
+        <table id="table-tlr" style="display:none">
+          <thead><tr><th>Caller</th><th>Rejections (24h)</th></tr></thead>
+          <tbody id="tlr-body"></tbody>
+        </table>
+      </div>
     </div>
+    </div> <!-- /tab-overview -->
   </div>
 
 <script>
@@ -207,6 +283,72 @@ async function renderRecentRequests() {
   }).join('');
 }
 
+// --- L3 token-cap panels ---------------------------------------------------
+let chartTBR = null;
+
+async function renderTokensByCaller() {
+  const j = await fetchJSON('/api/tokens-by-caller?hours=24');
+  const empty = document.getElementById('tbc-empty');
+  const tbl = document.getElementById('table-tbc');
+  if (!j || !j.data || !j.data.length) {
+    empty.style.display = ''; tbl.style.display = 'none';
+    if (j && j.note) empty.textContent = j.note;
+    return;
+  }
+  empty.style.display = 'none'; tbl.style.display = '';
+  document.getElementById('tbc-body').innerHTML = j.data.map(r => `
+    <tr>
+      <td>${r.caller || '-'}</td>
+      <td>${(r.input_tokens || 0).toLocaleString()}</td>
+      <td>${(r.output_tokens || 0).toLocaleString()}</td>
+      <td><strong>${(r.total_tokens || 0).toLocaleString()}</strong></td>
+      <td>${r.request_count || 0}</td>
+    </tr>`).join('');
+}
+
+async function renderTokenBurnRate() {
+  const j = await fetchJSON('/api/token-burn-rate?hours=24');
+  const empty = document.getElementById('tbr-empty');
+  if (!j || !j.data || !j.data.length) {
+    empty.style.display = '';
+    document.getElementById('chart-tbr').style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  document.getElementById('chart-tbr').style.display = '';
+  if (chartTBR) chartTBR.destroy();
+  chartTBR = new Chart(document.getElementById('chart-tbr'), {
+    type: 'line',
+    data: {
+      labels: j.data.map(d => d.minute),
+      datasets: [{
+        label: 'Tokens / minute',
+        data: j.data.map(d => d.tokens),
+        borderColor: COLORS[2],
+        backgroundColor: COLORS[2] + '33',
+        fill: true,
+        tension: 0.3,
+      }],
+    },
+    options: { plugins: { legend: { display: false } } },
+  });
+}
+
+async function renderTokenRejections() {
+  const j = await fetchJSON('/api/token-limit-rejections?hours=24');
+  const empty = document.getElementById('tlr-empty');
+  const tbl = document.getElementById('table-tlr');
+  if (!j || !j.data || !j.data.length) {
+    empty.style.display = ''; tbl.style.display = 'none';
+    if (j && j.note) empty.textContent = j.note;
+    return;
+  }
+  empty.style.display = 'none'; tbl.style.display = '';
+  document.getElementById('tlr-body').innerHTML = j.data.map(r => `
+    <tr><td>${r.caller || '-'}</td><td>${r.rejection_count || 0}</td></tr>
+  `).join('');
+}
+
 async function renderAll() {
   await Promise.all([
     renderRequestsPerDay(),
@@ -215,8 +357,76 @@ async function renderAll() {
     renderErrorRate(),
     renderTopCallers(),
     renderRecentRequests(),
+    renderTokensByCaller(),
+    renderTokenBurnRate(),
+    renderTokenRejections(),
   ]);
   document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+}
+
+// --- Tab switching ---------------------------------------------------------
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.getElementById('tab-overview').style.display = name === 'overview' ? '' : 'none';
+  document.getElementById('tab-settings').style.display = name === 'settings' ? '' : 'none';
+  if (name === 'settings') loadPolicy();
+}
+
+// --- Settings tab ----------------------------------------------------------
+async function loadPolicy() {
+  const j = await fetchJSON('/api/policy');
+  const status = document.getElementById('settings-status');
+  const editor = document.getElementById('settings-editor');
+  const saveBtn = document.getElementById('save-btn');
+  if (!j) {
+    status.textContent = 'Could not load current policy. Check dashboard SA permissions.';
+    return;
+  }
+  if (j.error) {
+    status.textContent = `Error reading policy: ${j.detail || j.error}`;
+    return;
+  }
+  // Populate fields with current values.
+  for (const [k, v] of Object.entries(j.values || {})) {
+    const el = document.querySelector(`#policy-form [name="${k}"]`);
+    if (el) el.value = v;
+  }
+  // Editor state.
+  if (!j.editors_configured) {
+    status.textContent = 'Settings tab is read-only. EDITORS env var on the dashboard is empty; ask your platform admin to populate it to enable editing.';
+    saveBtn.disabled = true;
+  } else if (!j.can_edit) {
+    status.textContent = `You are signed in as ${j.editor_email || '(unknown)'}, which is not on the EDITORS allowlist. Read-only.`;
+    saveBtn.disabled = true;
+  } else {
+    status.textContent = 'You can edit these values. Saving rolls a new revision (~30s).';
+    editor.textContent = `Signed in as ${j.editor_email}.`;
+    saveBtn.disabled = false;
+  }
+}
+
+async function submitPolicy(ev) {
+  ev.preventDefault();
+  const result = document.getElementById('save-result');
+  result.textContent = 'Saving…';
+  const data = {};
+  document.querySelectorAll('#policy-form input').forEach(i => data[i.name] = i.value);
+  try {
+    const r = await fetch('/api/policy', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data),
+    });
+    const j = await r.json();
+    if (r.ok) {
+      result.textContent = `✓ Updated: ${(j.updated || []).join(', ') || 'no changes'}. New revision deployed.`;
+    } else {
+      result.textContent = `✗ ${j.detail || j.error || ('HTTP ' + r.status)}`;
+    }
+  } catch (e) {
+    result.textContent = `✗ Network error: ${e.message}`;
+  }
+  return false;
 }
 
 document.addEventListener('DOMContentLoaded', () => {

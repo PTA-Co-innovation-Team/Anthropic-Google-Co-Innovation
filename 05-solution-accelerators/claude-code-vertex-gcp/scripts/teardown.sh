@@ -3,19 +3,17 @@
 # teardown.sh — interactive destroyer.
 #
 # Requires the user to type the project ID to confirm. Deletes:
-#   * Cloud Run services (llm-gateway, mcp-gateway, dev-portal,
-#     admin-dashboard)
+#   * Cloud Run services (llm-gateway, mcp-gateway, dev-portal)
 #   * GCE VM (claude-code-dev-shared) if present
 #   * Service accounts (llm-gateway, mcp-gateway, claude-code-dev-vm,
-#     dev-portal, admin-dashboard)
+#     dev-portal)
 #   * IAP SSH firewall rule (allow-iap-ssh)
 #
 # Does NOT:
 #   * Delete the Artifact Registry repo (keeps built images in case you
 #     re-deploy shortly after).
-#   * Delete the BigQuery dataset or its Looker Studio views (may
-#     contain historical logs of interest). Use `bq rm -r -f` manually
-#     if you want to remove the dataset and views.
+#   * Delete the BigQuery dataset (may contain historical logs of
+#     interest). Use `bq rm -r -f` manually if you want to remove it.
 #   * Disable APIs.
 # =============================================================================
 
@@ -35,20 +33,31 @@ HELP
 parse_common_flags "$@"
 require_cmd gcloud
 
+# Allow scripted teardown by setting PROJECT_ID + REGION + TEARDOWN_CONFIRM
+# in the environment. Otherwise fall back to interactive /dev/tty prompts.
 default_project="$(gcloud config get-value project 2>/dev/null || true)"
-read -rp "GCP project ID [${default_project}]: " PROJECT_ID </dev/tty
+if [[ -z "${PROJECT_ID:-}" ]]; then
+  read -rp "GCP project ID [${default_project}]: " PROJECT_ID </dev/tty
+fi
 PROJECT_ID="${PROJECT_ID:-${default_project}}"
 : "${PROJECT_ID:?project id required}"
 
-# Require the user to type the project id AGAIN to confirm.
-read -rp "To confirm teardown, type the project ID: " confirm_id </dev/tty
+# Confirmation. In scripted mode set TEARDOWN_CONFIRM=<PROJECT_ID> to skip
+# the second prompt; the value must match PROJECT_ID exactly.
+if [[ -z "${TEARDOWN_CONFIRM:-}" ]]; then
+  read -rp "To confirm teardown, type the project ID: " confirm_id </dev/tty
+else
+  confirm_id="${TEARDOWN_CONFIRM}"
+fi
 if [[ "${confirm_id}" != "${PROJECT_ID}" ]]; then
   log_error "confirmation did not match. aborted."
   exit 1
 fi
 
-# Region for Cloud Run services — ask, default us-central1.
-read -rp "Cloud Run region [us-central1]: " REGION </dev/tty
+# Region for Cloud Run services.
+if [[ -z "${REGION:-}" ]]; then
+  read -rp "Cloud Run region [us-central1]: " REGION </dev/tty
+fi
 REGION="${REGION:-us-central1}"
 ZONE="${REGION}-a"
 
@@ -127,25 +136,40 @@ if gcloud compute instances describe claude-code-dev-shared \
     --project "${PROJECT_ID}" --zone "${ZONE}" --quiet
 fi
 
-# --- Cloud NAT + Cloud Router -----------------------------------------------
-log_step "delete Cloud NAT and Cloud Router (if present)"
+# --- Firewall ---------------------------------------------------------------
+# Match both the default-VPC name (allow-iap-ssh) and the custom-VPC variant
+# (allow-iap-ssh-<network>) introduced by NETWORK_NAME override.
+log_step "delete IAP firewall rules"
+for fw in $(gcloud compute firewall-rules list --project "${PROJECT_ID}" \
+              --filter="name~^allow-iap-ssh" --format="value(name)" 2>/dev/null); do
+  run_cmd gcloud compute firewall-rules delete "${fw}" \
+    --project "${PROJECT_ID}" --quiet
+done
+
+# --- Cloud NAT + Router (only delete if we created them; they're labeled) ---
+log_step "delete Cloud NAT + Router (if present)"
 if gcloud compute routers nats describe claude-code-nat \
-     --router claude-code-router \
+     --router claude-code-nat-router \
      --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
   run_cmd gcloud compute routers nats delete claude-code-nat \
-    --router claude-code-router \
+    --router claude-code-nat-router \
     --project "${PROJECT_ID}" --region "${REGION}" --quiet
 fi
-if gcloud compute routers describe claude-code-router \
+if gcloud compute routers describe claude-code-nat-router \
      --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
-  run_cmd gcloud compute routers delete claude-code-router \
+  run_cmd gcloud compute routers delete claude-code-nat-router \
     --project "${PROJECT_ID}" --region "${REGION}" --quiet
 fi
+# Note: the `default` VPC is not deleted by teardown — it may pre-date this
+# deployment or be in use by other workloads. Operators who want a fully
+# clean slate should delete it manually with:
+#   gcloud compute networks delete default --project ${PROJECT_ID}
 
-# --- Firewall ---------------------------------------------------------------
-log_step "delete IAP firewall rule"
-if gcloud compute firewall-rules describe allow-iap-ssh --project "${PROJECT_ID}" >/dev/null 2>&1; then
-  run_cmd gcloud compute firewall-rules delete allow-iap-ssh \
+# --- Cloud Logging sink -----------------------------------------------------
+log_step "delete Cloud Logging sink"
+if gcloud logging sinks describe claude-code-gateway-logs \
+     --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  run_cmd gcloud logging sinks delete claude-code-gateway-logs \
     --project "${PROJECT_ID}" --quiet
 fi
 

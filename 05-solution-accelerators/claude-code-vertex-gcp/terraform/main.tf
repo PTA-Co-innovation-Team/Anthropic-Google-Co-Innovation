@@ -58,13 +58,11 @@ resource "google_artifact_registry_repository" "images" {
 module "network" {
   source = "./modules/network"
 
-  project_id          = var.project_id
-  region              = local.gce_region
-  use_psc             = var.use_psc
-  use_vpc_connector   = var.use_vpc_connector || var.enable_vpc_internal
-  enable_cloud_nat    = var.enable_dev_vm
-  enable_vpc_internal = var.enable_vpc_internal
-  labels              = local.labels
+  project_id        = var.project_id
+  region            = local.gce_region
+  use_psc           = var.use_psc
+  use_vpc_connector = var.use_vpc_connector
+  labels            = local.labels
 
   depends_on = [google_project_service.apis]
 }
@@ -76,16 +74,15 @@ module "llm_gateway" {
   count  = var.enable_llm_gateway ? 1 : 0
   source = "./modules/llm_gateway"
 
-  project_id          = var.project_id
-  region              = local.gce_region
-  vertex_region       = var.region
-  image               = var.llm_gateway_image
-  allowed_principals  = local.gateway_allowed_principals
-  vpc_connector_name  = module.network.vpc_connector_name
-  use_vpc_connector   = var.use_vpc_connector || var.enable_vpc_internal
-  enable_glb          = var.enable_glb
-  enable_vpc_internal = var.enable_vpc_internal
-  labels              = local.labels
+  project_id         = var.project_id
+  region             = local.gce_region
+  vertex_region      = var.region
+  image              = var.llm_gateway_image
+  allowed_principals = local.gateway_allowed_principals
+  vpc_connector_name = module.network.vpc_connector_name
+  use_vpc_connector  = var.use_vpc_connector
+  enable_glb         = var.enable_glb
+  labels             = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
 }
@@ -97,16 +94,15 @@ module "mcp_gateway" {
   count  = var.enable_mcp_gateway ? 1 : 0
   source = "./modules/mcp_gateway"
 
-  project_id          = var.project_id
-  region              = local.gce_region
-  vertex_region       = var.region
-  image               = var.mcp_gateway_image
-  allowed_principals  = local.gateway_allowed_principals
-  vpc_connector_name  = module.network.vpc_connector_name
-  use_vpc_connector   = var.use_vpc_connector || var.enable_vpc_internal
-  enable_glb          = var.enable_glb
-  enable_vpc_internal = var.enable_vpc_internal
-  labels              = local.labels
+  project_id         = var.project_id
+  region             = local.gce_region
+  vertex_region      = var.region
+  image              = var.mcp_gateway_image
+  allowed_principals = local.gateway_allowed_principals
+  vpc_connector_name = module.network.vpc_connector_name
+  use_vpc_connector  = var.use_vpc_connector
+  enable_glb         = var.enable_glb
+  labels             = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
 }
@@ -118,13 +114,12 @@ module "dev_portal" {
   count  = var.enable_dev_portal ? 1 : 0
   source = "./modules/dev_portal"
 
-  project_id          = var.project_id
-  region              = local.gce_region
-  image               = var.dev_portal_image
-  allowed_principals  = var.allowed_principals
-  enable_glb          = var.enable_glb
-  enable_vpc_internal = var.enable_vpc_internal
-  labels              = local.labels
+  project_id         = var.project_id
+  region             = local.gce_region
+  image              = var.dev_portal_image
+  allowed_principals = var.allowed_principals
+  enable_glb         = var.enable_glb
+  labels             = local.labels
 
   depends_on = [google_artifact_registry_repository.images]
 }
@@ -157,8 +152,8 @@ module "dev_vm" {
     ? module.glb[0].glb_url
     : var.enable_mcp_gateway ? module.mcp_gateway[0].service_url : ""
   )
-  vertex_region = var.region
-  labels        = local.labels
+  vertex_region            = var.region
+  labels                   = local.labels
 }
 
 # -----------------------------------------------------------------------------
@@ -168,11 +163,9 @@ module "observability" {
   count  = var.enable_observability ? 1 : 0
   source = "./modules/observability"
 
-  project_id          = var.project_id
-  region              = local.gce_region
-  labels              = local.labels
-  enable_looker_views = var.enable_looker_views
-  log_table_name      = var.log_table_name
+  project_id = var.project_id
+  region     = local.gce_region
+  labels     = local.labels
 
   depends_on = [google_project_service.apis]
 }
@@ -184,16 +177,16 @@ module "glb" {
   count  = var.enable_glb ? 1 : 0
   source = "./modules/glb"
 
-  project_id                   = var.project_id
-  region                       = local.gce_region
-  domain                       = var.glb_domain
-  iap_support_email            = var.iap_support_email
-  allowed_principals           = var.allowed_principals
-  llm_gateway_service_name     = var.enable_llm_gateway ? module.llm_gateway[0].service_name : ""
-  mcp_gateway_service_name     = var.enable_mcp_gateway ? module.mcp_gateway[0].service_name : ""
-  dev_portal_service_name      = var.enable_dev_portal ? module.dev_portal[0].service_name : ""
-  admin_dashboard_service_name = var.admin_dashboard_service_name
-  labels                       = local.labels
+  project_id               = var.project_id
+  region                   = local.gce_region
+  domain                   = var.glb_domain
+  iap_support_email        = var.iap_support_email
+  allowed_principals       = var.allowed_principals
+  llm_gateway_service_name      = var.enable_llm_gateway ? module.llm_gateway[0].service_name : ""
+  mcp_gateway_service_name      = var.enable_mcp_gateway ? module.mcp_gateway[0].service_name : ""
+  dev_portal_service_name       = var.enable_dev_portal ? module.dev_portal[0].service_name : ""
+  admin_dashboard_service_name  = var.admin_dashboard_service_name
+  labels                        = local.labels
 
   depends_on = [module.llm_gateway, module.mcp_gateway, module.dev_portal]
 }

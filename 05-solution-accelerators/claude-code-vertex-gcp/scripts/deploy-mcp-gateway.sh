@@ -57,10 +57,26 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" \
   wait_for_sa "${SA_EMAIL}"
 fi
 
-log_step "grant SA roles"
-for role in roles/logging.logWriter roles/iam.serviceAccountViewer; do
+log_step "grant SA narrow read-only roles for shipped MCP tools"
+# Roles granted (least-privilege per tool):
+#   logging.logWriter           — emit structured logs
+#   iam.serviceAccountViewer    — token_validation SA-token email lookup
+#   serviceusage.serviceUsageViewer — gcp_project_info enabled-APIs count
+#   run.viewer                  — list_cloud_run_services
+#   logging.viewer              — recent_gateway_errors
+#   bigquery.dataViewer         — gateway_traffic_summary (BQ read)
+#   bigquery.jobUser            — gateway_traffic_summary (BQ query submit)
+for role in \
+    roles/logging.logWriter \
+    roles/iam.serviceAccountViewer \
+    roles/serviceusage.serviceUsageViewer \
+    roles/run.viewer \
+    roles/logging.viewer \
+    roles/bigquery.dataViewer \
+    roles/bigquery.jobUser; do
   run_cmd gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${SA_EMAIL}" --role="${role}" --condition=None --quiet
+    --member="serviceAccount:${SA_EMAIL}" --role="${role}" \
+    --condition=None --quiet
 done
 
 log_step "build + push ${IMAGE}"
@@ -78,8 +94,6 @@ fi
 
 if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
   INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
-elif [[ "${ENABLE_VPC_INTERNAL:-false}" == "true" ]]; then
-  INGRESS_FLAG="--ingress internal"
 else
   INGRESS_FLAG="--ingress all"
 fi

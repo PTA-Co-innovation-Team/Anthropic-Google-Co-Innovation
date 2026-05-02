@@ -263,11 +263,19 @@ if [[ -n "${IAP_SUPPORT_EMAIL}" ]]; then
 
   if ! gcloud iap oauth-brands describe "${BRAND_NAME}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
     log_info "creating IAP OAuth brand (consent screen)"
-    run_cmd gcloud iap oauth-brands create \
-      --project "${PROJECT_ID}" \
-      --application_title="Claude Code on GCP" \
-      --support_email="${IAP_SUPPORT_EMAIL}" || \
-      log_warn "IAP brand creation failed — you may need to configure the OAuth consent screen manually in the Cloud Console"
+    if ! gcloud iap oauth-brands create \
+         --project "${PROJECT_ID}" \
+         --application_title="Claude Code on GCP" \
+         --support_email="${IAP_SUPPORT_EMAIL}" 2>&1; then
+      log_error "IAP brand creation FAILED."
+      log_error "  Most likely cause: this project has Cloud Identity / Workspace org policies"
+      log_error "  that prevent programmatic OAuth consent screen creation. Manual fix:"
+      log_error "    1. Open https://console.cloud.google.com/apis/credentials/consent?project=${PROJECT_ID}"
+      log_error "    2. Pick user type Internal (Workspace) or External (Gmail)."
+      log_error "    3. App name: 'Claude Code on GCP', support email: ${IAP_SUPPORT_EMAIL}."
+      log_error "    4. Save, then re-run scripts/deploy-glb.sh."
+      exit 1
+    fi
   else
     log_info "IAP OAuth brand already exists"
   fi
@@ -280,11 +288,16 @@ if [[ -n "${IAP_SUPPORT_EMAIL}" ]]; then
 
   if [[ -z "${EXISTING_CLIENT}" ]]; then
     log_info "creating IAP OAuth client"
-    CLIENT_OUTPUT="$(gcloud iap oauth-clients create "${BRAND_NAME}" \
-      --project "${PROJECT_ID}" \
-      --display_name="Claude Code GLB IAP Client" \
-      --format='value(name,secret)' 2>/dev/null)" || \
-      log_warn "IAP client creation failed — IAP may require manual Console setup"
+    if ! CLIENT_OUTPUT="$(gcloud iap oauth-clients create "${BRAND_NAME}" \
+         --project "${PROJECT_ID}" \
+         --display_name="Claude Code GLB IAP Client" \
+         --format='value(name,secret)' 2>&1)"; then
+      log_error "IAP client creation FAILED:"
+      log_error "  ${CLIENT_OUTPUT}"
+      log_error "  Verify the brand exists at https://console.cloud.google.com/apis/credentials?project=${PROJECT_ID}"
+      log_error "  and that your account holds roles/iap.admin on the project."
+      exit 1
+    fi
 
     if [[ -n "${CLIENT_OUTPUT}" ]]; then
       # gcloud returns the full resource path as the name field:
