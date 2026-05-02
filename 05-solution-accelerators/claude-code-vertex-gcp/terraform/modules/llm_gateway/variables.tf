@@ -49,8 +49,39 @@ variable "enable_glb" {
   default     = false
 }
 
-variable "enable_vpc_internal" {
-  description = "When true, restrict ingress to VPC-internal only (developers access via dev VM + IAP SSH tunneling; no VPN required)."
-  type        = bool
-  default     = false
+# --- Traffic policy (optional, all empty = disabled) ------------------------
+variable "rate_limit_per_min" {
+  description = "Per-caller request cap, requests per minute. 0 disables. Default 0."
+  type        = number
+  default     = 0
+}
+
+variable "rate_limit_burst" {
+  description = "Per-caller burst capacity. Defaults to rate_limit_per_min if 0."
+  type        = number
+  default     = 0
+}
+
+variable "token_limit_per_min" {
+  description = "Per-caller LLM token cap (input + output) per minute. 0 disables. Default 0."
+  type        = number
+  default     = 0
+}
+
+variable "token_limit_burst" {
+  description = "Per-caller token-bucket burst capacity. Defaults to token_limit_per_min if 0."
+  type        = number
+  default     = 0
+}
+
+variable "allowed_models" {
+  description = "Comma-separated allowlist of model names (e.g. claude-sonnet-4-6,claude-haiku-4-5). Empty = no allowlist."
+  type        = string
+  default     = ""
+}
+
+variable "model_rewrite" {
+  description = "Comma-separated model rewrite rules (e.g. claude-opus-4-6=claude-sonnet-4-6). Empty = no rewriting."
+  type        = string
+  default     = ""
 }

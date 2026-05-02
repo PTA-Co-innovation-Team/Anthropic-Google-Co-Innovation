@@ -39,7 +39,16 @@ from fastmcp import FastMCP
 
 # Local tool implementations. Add new imports here when you add new
 # files under tools/.
+from tools.gateway_traffic_summary import (
+    gateway_traffic_summary as _traffic_summary,
+)
 from tools.gcp_project_info import get_project_info
+from tools.list_cloud_run_services import (
+    list_cloud_run_services as _list_cloud_run_services,
+)
+from tools.recent_gateway_errors import (
+    recent_gateway_errors as _recent_gateway_errors,
+)
 
 
 # ----------------------------------------------------------------------------
@@ -83,6 +92,66 @@ def gcp_project_info() -> dict:
     """
     log.info("tool_call gcp_project_info")
     return get_project_info()
+
+
+@mcp.tool()
+def list_cloud_run_services(region: str | None = None, max_results: int = 50) -> dict:
+    """List Cloud Run services in the current project.
+
+    Use this when the developer asks Claude what's deployed without
+    wanting to shell out to ``gcloud`` themselves. Read-only.
+
+    Args:
+        region: Cloud Run region (e.g. ``us-central1``). Defaults to the
+            gateway's own region. Pass ``"-"`` to list across all regions.
+        max_results: Cap on the number of services returned. Default 50.
+
+    Returns:
+        Dict with ``services`` (list of {name, region, url, last_revision,
+        ready, last_deployed_at}), ``count``, ``truncated``, ``region``.
+    """
+    log.info("tool_call list_cloud_run_services region=%s", region)
+    return _list_cloud_run_services(region=region, max_results=max_results)
+
+
+@mcp.tool()
+def recent_gateway_errors(hours: int = 1, max_results: int = 25) -> dict:
+    """Return recent ERROR/WARNING log entries from the gateway services.
+
+    Useful when the developer asks Claude to triage a gateway problem;
+    Claude can grab the actual log lines without the user copy-pasting
+    from Cloud Logging. Read-only.
+
+    Args:
+        hours: Time window. Default 1 hour, max 168 (one week).
+        max_results: Cap on entries returned. Default 25, max 200.
+
+    Returns:
+        Dict with ``errors`` (list of {timestamp, severity, service,
+        summary}), ``count``, ``window_hours``.
+    """
+    log.info("tool_call recent_gateway_errors hours=%s", hours)
+    return _recent_gateway_errors(hours=hours, max_results=max_results)
+
+
+@mcp.tool()
+def gateway_traffic_summary(hours: int = 24) -> dict:
+    """Summarize gateway traffic over the last `hours` hours.
+
+    Reads from the BigQuery dataset populated by the observability
+    module. Lets a developer ask "how busy was the gateway today?" or
+    "who's been the heaviest user this week?" without leaving Claude.
+
+    Args:
+        hours: Time window in hours. Default 24, max 720 (30 days).
+
+    Returns:
+        Dict with ``window_hours``, ``total_requests``, ``by_model``
+        (list of {model, count}), ``by_caller`` (top 10),
+        ``error_rate_pct``, and ``latency_ms`` ({p50, p95, p99}).
+    """
+    log.info("tool_call gateway_traffic_summary hours=%s", hours)
+    return _traffic_summary(hours=hours)
 
 
 # ----------------------------------------------------------------------------

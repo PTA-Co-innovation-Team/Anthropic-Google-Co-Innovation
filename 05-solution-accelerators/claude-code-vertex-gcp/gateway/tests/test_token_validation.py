@@ -112,7 +112,7 @@ class TestAccessToken:
         with TestClient(app) as client:
             resp = client.get(
                 "/v1/test",
-                headers={"Authorization": "Bearer test-access-token"},
+                headers={"Authorization": "Bearer ya29.fake-access-token"},
             )
         assert resp.status_code == 200
         body = resp.json()
@@ -127,7 +127,7 @@ class TestAccessToken:
         with TestClient(app) as client:
             resp = client.get(
                 "/v1/test",
-                headers={"Authorization": "Bearer test-invalid-token"},
+                headers={"Authorization": "Bearer ya29.invalid-token"},
             )
         assert resp.status_code == 401
         assert resp.json()["error"] == "invalid_token"
@@ -173,7 +173,7 @@ class TestAllowedPrincipals:
         with TestClient(app) as client:
             resp = client.get(
                 "/v1/test",
-                headers={"Authorization": "Bearer test-allowed-token"},
+                headers={"Authorization": "Bearer ya29.allowed-token"},
             )
         assert resp.status_code == 200
         assert resp.json()["caller_email"] == ADMIN_EMAIL
@@ -186,7 +186,7 @@ class TestAllowedPrincipals:
         with TestClient(app) as client:
             resp = client.get(
                 "/v1/test",
-                headers={"Authorization": "Bearer test-denied-token"},
+                headers={"Authorization": "Bearer ya29.denied-token"},
             )
         assert resp.status_code == 403
         assert resp.json()["error"] == "forbidden"

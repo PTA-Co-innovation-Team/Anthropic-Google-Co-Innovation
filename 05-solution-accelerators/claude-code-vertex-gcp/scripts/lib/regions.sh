@@ -34,6 +34,12 @@ _REGION_RE='^(global|us|europe|asia|[a-z]+-[a-z]+[0-9]+)$'
 # Prompts and menu go to stderr so stdout is clean.
 # -----------------------------------------------------------------------------
 pick_region() {
+  # Honor a pre-set REGION env var if it matches the region regex.
+  if [[ -n "${REGION:-}" && "${REGION}" =~ $_REGION_RE ]]; then
+    echo "${REGION}"
+    return 0
+  fi
+
   # Menu.
   echo "" >&2
   echo "Choose a Vertex region:" >&2

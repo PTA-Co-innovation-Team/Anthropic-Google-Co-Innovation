@@ -32,13 +32,6 @@ _TOKEN_CACHE: cachetools.TTLCache[str, str] = cachetools.TTLCache(
     maxsize=1024, ttl=30
 )
 
-# Maps a GCE service account numeric unique ID (from tokeninfo ``azp``)
-# to its email. GCE metadata tokens don't include ``email`` in tokeninfo,
-# so we resolve it once via the IAM API and cache it.
-_SA_ID_TO_EMAIL: cachetools.TTLCache[str, str] = cachetools.TTLCache(
-    maxsize=256, ttl=3600
-)
-
 _SKIP_PATHS = frozenset({"/health", "/healthz"})
 
 
@@ -60,13 +53,26 @@ _ALLOWED_PRINCIPALS = _load_allowed_principals()
 
 
 def _is_jwt(token: str) -> bool:
-    if token.startswith("ya29."):
-        return False
+    """Heuristic test: does this look like a JWT?
+
+    Three segments alone is NOT enough — Google OAuth2 access tokens
+    (``ya29.c.c0...``) also have three dot-separated segments but are
+    NOT JWTs and must be verified via tokeninfo, not signature
+    validation. A real JWT has a base64url-encoded JSON header with at
+    minimum an ``alg`` field; we use that as the discriminator.
+    """
     parts = token.split(".")
     if len(parts) != 3 or not all(parts):
         return False
-    # Real JWTs have a base64url-encoded header ≥ 20 chars.
-    return len(parts[0]) >= 20
+    import base64
+    import json as _json
+
+    try:
+        padded = parts[0] + "=" * (-len(parts[0]) % 4)
+        header = _json.loads(base64.urlsafe_b64decode(padded))
+        return isinstance(header, dict) and "alg" in header
+    except Exception:
+        return False
 
 
 async def _verify_oidc_token(token: str) -> Optional[str]:
@@ -80,35 +86,59 @@ async def _verify_oidc_token(token: str) -> Optional[str]:
         return None
 
 
-async def _resolve_sa_email(unique_id: str) -> Optional[str]:
-    """Resolve a service account email from its numeric unique ID via IAM."""
-    cached = _SA_ID_TO_EMAIL.get(unique_id)
+# SA uniqueId → email cache. SA emails are stable per-uniqueId for the
+# life of the SA, so this cache never needs invalidation.
+_SA_UNIQUEID_CACHE: cachetools.LRUCache[str, str] = cachetools.LRUCache(maxsize=512)
+
+
+async def _resolve_sa_email_by_uniqueid(
+    unique_id: str, http_client: httpx.AsyncClient
+) -> Optional[str]:
+    """Look up a service account email by its numeric uniqueId.
+
+    Why this exists: Google's ``oauth2/tokeninfo`` endpoint does NOT
+    populate the ``email`` field for service-account access tokens
+    (only for user OAuth tokens). It returns ``azp`` instead, which is
+    the SA's numeric uniqueId. To enforce ``ALLOWED_PRINCIPALS`` against
+    SA tokens we must resolve uniqueId → email via the IAM API.
+
+    Requires the gateway's own service account to have
+    ``iam.serviceAccounts.get`` (e.g. ``roles/iam.serviceAccountViewer``)
+    on the project that owns the calling SA.
+    """
+    cached = _SA_UNIQUEID_CACHE.get(unique_id)
     if cached is not None:
         return cached
 
     try:
+        # Lazy import — only needed when SA-token branch is exercised.
         import google.auth
-        import google.auth.transport.requests
+        import google.auth.transport.requests as g_requests
 
-        credentials, _ = google.auth.default()
-        credentials.refresh(google.auth.transport.requests.Request())
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        if not creds.valid:
+            creds.refresh(g_requests.Request())
 
-        url = f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{unique_id}"
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {credentials.token}"},
+        resp = await http_client.get(
+            f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{unique_id}",
+            headers={"Authorization": f"Bearer {creds.token}"},
+        )
+        if resp.status_code == 200:
+            email = resp.json().get("email")
+            if email:
+                _SA_UNIQUEID_CACHE[unique_id] = email
+                return email
+        else:
+            log.warning(
+                "sa_lookup_failed status=%s body=%s",
+                resp.status_code,
+                resp.text[:200],
             )
-        if resp.status_code != 200:
-            log.warning("sa_lookup_failed status=%d id=%s", resp.status_code, unique_id)
-            return None
-        email = resp.json().get("email")
-        if email:
-            _SA_ID_TO_EMAIL[unique_id] = email
-        return email
     except Exception:
-        log.debug("sa_lookup_error", exc_info=True)
-        return None
+        log.warning("sa_lookup_exception", exc_info=True)
+    return None
 
 
 async def _verify_access_token(token: str) -> Optional[str]:
@@ -122,23 +152,21 @@ async def _verify_access_token(token: str) -> Optional[str]:
                 "https://oauth2.googleapis.com/tokeninfo",
                 params={"access_token": token},
             )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        email = data.get("email")
-
-        # GCE metadata tokens don't include email in tokeninfo.
-        # Fall back to resolving via IAM API using the numeric unique ID.
-        if not email:
-            unique_id = data.get("azp")
-            if unique_id and unique_id.isdigit():
-                email = await _resolve_sa_email(unique_id)
-
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            email = data.get("email")
+            # GCE metadata-server SA tokens do not include `email`; they
+            # include `azp` (the SA's numeric uniqueId). Resolve it.
+            if not email:
+                azp = data.get("azp", "")
+                if azp.isdigit():
+                    email = await _resolve_sa_email_by_uniqueid(azp, client)
         if email:
             _TOKEN_CACHE[token] = email
         return email
     except Exception:
-        log.debug("access_token_verification_failed", exc_info=True)
+        log.warning("access_token_verification_failed", exc_info=True)
         return None
 
 

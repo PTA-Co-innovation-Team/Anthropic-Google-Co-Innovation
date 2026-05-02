@@ -2,9 +2,8 @@
 # =============================================================================
 # deploy-observability.sh
 #
-# Creates the BigQuery dataset, Cloud Logging sink, BigQuery views for
-# Looker Studio (if raw log table exists), and deploys the admin dashboard
-# Cloud Run service.
+# Creates the BigQuery dataset, Cloud Logging sink, and deploys the admin
+# dashboard Cloud Run service.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,103 +99,6 @@ else
   log_warn "could not determine sink writer identity; IAM grant skipped"
 fi
 
-# --- BigQuery views for Looker Studio (non-fatal) ---------------------------
-# Discover the raw log table name, then create/update stable views that
-# Looker Studio can connect to as data sources. Failures here are warnings —
-# view creation must NEVER block the admin dashboard deployment.
-log_step "create BigQuery views for Looker Studio"
-LOG_TABLE_NAME=""
-
-_tables_resp="$(curl -sS \
-  -H "Authorization: Bearer ${_bq_token}" \
-  "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/${DATASET_ID}/tables" 2>/dev/null || echo "")"
-
-if [[ -n "${_tables_resp}" ]]; then
-  LOG_TABLE_NAME="$(echo "${_tables_resp}" | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    tables = data.get("tables", [])
-    for t in tables:
-        tid = t.get("tableReference", {}).get("tableId", "")
-        if tid.startswith("run_googleapis_com_"):
-            print(tid)
-            break
-except Exception:
-    pass
-' 2>/dev/null || echo "")"
-fi
-
-if [[ -z "${LOG_TABLE_NAME}" ]]; then
-  log_warn "no run_googleapis_com_* table found in ${DATASET_ID} — views skipped"
-  log_warn "(tables appear ~60s after the first gateway request; re-run to create views)"
-else
-  log_info "discovered raw table: ${LOG_TABLE_NAME}"
-
-  _create_or_update_view() {
-    local view_id="$1" view_sql="$2"
-    local payload
-    payload="$(python3 -c '
-import json, sys
-print(json.dumps({
-    "tableReference": {
-        "projectId": sys.argv[1],
-        "datasetId": sys.argv[2],
-        "tableId": sys.argv[3],
-    },
-    "view": {
-        "query": sys.argv[4],
-        "useLegacySql": False,
-    },
-}))
-' "${PROJECT_ID}" "${DATASET_ID}" "${view_id}" "${view_sql}")"
-
-    local resp http_code
-    http_code="$(curl -sS -o /dev/null -w "%{http_code}" \
-      -H "Authorization: Bearer ${_bq_token}" \
-      "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/${DATASET_ID}/tables/${view_id}" 2>/dev/null)"
-
-    if [[ "${http_code}" == "200" ]]; then
-      resp="$(curl -sS -w "\n%{http_code}" -X PUT \
-        -H "Authorization: Bearer ${_bq_token}" \
-        -H "Content-Type: application/json" \
-        "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/${DATASET_ID}/tables/${view_id}" \
-        -d "${payload}" 2>/dev/null)"
-    else
-      resp="$(curl -sS -w "\n%{http_code}" -X POST \
-        -H "Authorization: Bearer ${_bq_token}" \
-        -H "Content-Type: application/json" \
-        "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/${DATASET_ID}/tables" \
-        -d "${payload}" 2>/dev/null)"
-    fi
-
-    local code
-    code="$(echo "${resp}" | tail -1)"
-    if [[ "${code}" =~ ^2 ]]; then
-      log_info "  ${view_id} — OK"
-    else
-      log_warn "  ${view_id} — failed (HTTP ${code})"
-    fi
-  }
-
-  _FQ_TABLE="\`${PROJECT_ID}.${DATASET_ID}.${LOG_TABLE_NAME}\`"
-
-  _create_or_update_view "v_requests_summary" \
-    "SELECT DATE(timestamp) AS date, jsonPayload.model AS model, jsonPayload.caller AS caller, jsonPayload.vertex_region AS vertex_region, COUNT(*) AS request_count, COUNTIF(CAST(jsonPayload.status_code AS INT64) >= 400) AS error_count FROM ${_FQ_TABLE} WHERE jsonPayload.model IS NOT NULL GROUP BY date, model, caller, vertex_region"
-
-  _create_or_update_view "v_error_analysis" \
-    "SELECT DATE(timestamp) AS date, jsonPayload.model AS model, CAST(jsonPayload.status_code AS INT64) AS status_code, jsonPayload.caller AS caller, COUNT(*) AS count FROM ${_FQ_TABLE} WHERE CAST(jsonPayload.status_code AS INT64) >= 400 GROUP BY date, model, status_code, caller"
-
-  _create_or_update_view "v_latency_stats" \
-    "SELECT timestamp, DATE(timestamp) AS date, jsonPayload.model AS model, jsonPayload.caller AS caller, CAST(jsonPayload.latency_ms_to_headers AS INT64) AS latency_ms FROM ${_FQ_TABLE} WHERE jsonPayload.latency_ms_to_headers IS NOT NULL"
-
-  _create_or_update_view "v_top_callers" \
-    "SELECT jsonPayload.caller AS caller, jsonPayload.model AS model, COUNT(*) AS request_count, COUNTIF(CAST(jsonPayload.status_code AS INT64) >= 400) AS error_count, MIN(timestamp) AS first_seen, MAX(timestamp) AS last_seen FROM ${_FQ_TABLE} WHERE jsonPayload.caller IS NOT NULL GROUP BY caller, model"
-
-  _create_or_update_view "v_recent_requests" \
-    "SELECT timestamp, jsonPayload.caller AS caller, jsonPayload.caller_source AS caller_source, jsonPayload.method AS method, jsonPayload.model AS model, CAST(jsonPayload.status_code AS INT64) AS status_code, CAST(jsonPayload.latency_ms_to_headers AS INT64) AS latency_ms, jsonPayload.vertex_region AS vertex_region, jsonPayload.path AS path FROM ${_FQ_TABLE} WHERE jsonPayload.model IS NOT NULL"
-fi
-
 # --- Service account for admin-dashboard (idempotent) -----------------------
 log_step "ensure service account ${SA_ID}"
 if gcloud iam service-accounts describe "${SA_EMAIL}" \
@@ -216,6 +118,44 @@ for role in roles/bigquery.dataViewer roles/bigquery.jobUser roles/logging.logWr
     --condition=None --quiet
 done
 
+# --- Settings tab IAM (scoped to llm-gateway only) --------------------------
+# Dashboard's settings tab needs to mutate llm-gateway env vars via the
+# Cloud Run admin API. Two roles required:
+#   roles/run.developer     — scoped to llm-gateway only (bounded blast radius)
+#   roles/artifactregistry.reader — needed because every Cloud Run revision
+#                                    update pulls the image from Artifact
+#                                    Registry; without it the new revision
+#                                    fails to start with 403. Granted at the
+#                                    repo level (not project-wide).
+if gcloud run services describe llm-gateway \
+     --project "${PROJECT_ID}" --region "${CR_REGION}" >/dev/null 2>&1; then
+  log_step "grant dashboard SA roles/run.developer scoped to llm-gateway"
+  run_cmd gcloud run services add-iam-policy-binding llm-gateway \
+    --project "${PROJECT_ID}" --region "${CR_REGION}" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="roles/run.developer" --condition=None --quiet
+
+  log_step "grant dashboard SA roles/artifactregistry.reader on ${AR_REPO}"
+  run_cmd gcloud artifacts repositories add-iam-policy-binding "${AR_REPO}" \
+    --project "${PROJECT_ID}" --location "${CR_REGION}" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="roles/artifactregistry.reader" --condition=None --quiet
+
+  # Third role: actAs on the llm-gateway SA. Cloud Run requires the
+  # caller of UpdateService to be able to "act as" the runtime SA of the
+  # service being updated, even if no SA change is happening. Without
+  # this, PATCH succeeds at the API auth check but fails at the
+  # service-account validation step with a 403.
+  log_step "grant dashboard SA roles/iam.serviceAccountUser on llm-gateway SA"
+  run_cmd gcloud iam service-accounts add-iam-policy-binding \
+    "llm-gateway@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --project "${PROJECT_ID}" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="roles/iam.serviceAccountUser" --condition=None --quiet
+else
+  log_info "llm-gateway not deployed yet — skipping settings-tab IAM (dashboard will be read-only until llm-gateway exists and you re-run this script)"
+fi
+
 # --- Build + push dashboard image -------------------------------------------
 log_step "build + push ${IMAGE}"
 run_cmd gcloud builds submit "${REPO_ROOT}/dashboard" \
@@ -228,9 +168,6 @@ log_step "deploy Cloud Run service ${SERVICE_NAME}"
 
 if [[ "${ENABLE_GLB:-false}" == "true" ]]; then
   INGRESS_FLAG="--ingress internal-and-cloud-load-balancing"
-  AUTH_FLAG="--no-allow-unauthenticated"
-elif [[ "${ENABLE_VPC_INTERNAL:-false}" == "true" ]]; then
-  INGRESS_FLAG="--ingress internal"
   AUTH_FLAG="--no-allow-unauthenticated"
 else
   INGRESS_FLAG="--ingress all"
@@ -247,7 +184,7 @@ run_cmd gcloud run deploy "${SERVICE_NAME}" \
   --min-instances 0 --max-instances 2 \
   --cpu 1 --memory 256Mi \
   --port 8080 \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},BQ_DATASET=${DATASET_ID}" \
+  --set-env-vars "^;^GOOGLE_CLOUD_PROJECT=${PROJECT_ID};BQ_DATASET=${DATASET_ID};EDITORS=${EDITORS:-};LLM_GATEWAY_SERVICE=llm-gateway;LLM_GATEWAY_REGION=${CR_REGION}" \
   --quiet
 
 # --- Grant invoker to principals -------------------------------------------
@@ -258,6 +195,3 @@ URL="$(gcloud run services describe "${SERVICE_NAME}" \
         --format="value(status.url)" 2>/dev/null || echo "")"
 log_info "Admin Dashboard URL: ${URL}"
 log_info "Note: BigQuery data appears ~60s after the first gateway request."
-if [[ -n "${LOG_TABLE_NAME:-}" ]]; then
-  log_info "Looker Studio: run scripts/setup-looker-studio.sh for a pre-configured report URL"
-fi

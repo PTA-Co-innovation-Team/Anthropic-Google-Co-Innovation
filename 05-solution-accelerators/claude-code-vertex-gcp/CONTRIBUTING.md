@@ -28,8 +28,7 @@ to the gateway service is extremely helpful.
 5. For any shell change, run `bash -n` on the touched scripts.
 6. Run `scripts/pre-deploy-check.sh` before submitting — it validates
    code consistency across deploy scripts, Terraform modules, and
-   application code (33 checks covering GLB, VPC internal, IAP, Cloud
-   NAT, teardown coverage, and Looker Studio views — no GCP access needed).
+   application code (19 checks, no GCP access needed).
 7. Keep the beginner-friendly tone. Heavy comments are a feature, not a bug
    — don't strip them in the name of concision.
 8. Update `README.md`, `ARCHITECTURE.md`, `COSTS.md`, or

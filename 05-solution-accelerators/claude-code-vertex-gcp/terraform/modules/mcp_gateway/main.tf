@@ -31,9 +31,47 @@ resource "google_project_iam_member" "sa_logwriter" {
   member  = "serviceAccount:${google_service_account.sa.email}"
 }
 
-resource "google_project_iam_member" "sa_viewer" {
+# token_validation.py resolves SA email from `azp` (uniqueId) when callers
+# present GCE-metadata-server access tokens. Without this role, requests
+# from a Dev VM are rejected 401.
+resource "google_project_iam_member" "sa_iamviewer" {
   project = var.project_id
   role    = "roles/iam.serviceAccountViewer"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}
+
+# Narrow read-only roles required by the shipped tools:
+#   - serviceusage.serviceUsageViewer → gcp_project_info enabled-APIs count
+#   - run.viewer                       → list_cloud_run_services
+#   - logging.viewer                   → recent_gateway_errors
+#   - bigquery.dataViewer + jobUser    → gateway_traffic_summary
+resource "google_project_iam_member" "sa_serviceusage_viewer" {
+  project = var.project_id
+  role    = "roles/serviceusage.serviceUsageViewer"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}
+
+resource "google_project_iam_member" "sa_run_viewer" {
+  project = var.project_id
+  role    = "roles/run.viewer"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}
+
+resource "google_project_iam_member" "sa_logging_viewer" {
+  project = var.project_id
+  role    = "roles/logging.viewer"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}
+
+resource "google_project_iam_member" "sa_bq_viewer" {
+  project = var.project_id
+  role    = "roles/bigquery.dataViewer"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}
+
+resource "google_project_iam_member" "sa_bq_jobuser" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
   member  = "serviceAccount:${google_service_account.sa.email}"
 }
 
@@ -43,11 +81,7 @@ resource "google_cloud_run_v2_service" "gateway" {
   location = var.region
   labels   = var.labels
 
-  ingress = (
-    var.enable_glb          ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" :
-    var.enable_vpc_internal ? "INGRESS_TRAFFIC_INTERNAL_ONLY" :
-                              "INGRESS_TRAFFIC_ALL"
-  )
+  ingress              = var.enable_glb ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
   invoker_iam_disabled = true
 
   template {
@@ -59,7 +93,7 @@ resource "google_cloud_run_v2_service" "gateway" {
     }
 
     dynamic "vpc_access" {
-      for_each = (var.use_vpc_connector || var.enable_vpc_internal) && var.vpc_connector_name != "" ? [1] : []
+      for_each = var.use_vpc_connector && var.vpc_connector_name != "" ? [1] : []
       content {
         connector = "projects/${var.project_id}/locations/${var.region}/connectors/${var.vpc_connector_name}"
         egress    = "PRIVATE_RANGES_ONLY"

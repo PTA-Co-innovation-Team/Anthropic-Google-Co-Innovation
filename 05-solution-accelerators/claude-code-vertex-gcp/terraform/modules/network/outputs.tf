@@ -32,13 +32,3 @@ output "psc_ip_address" {
   description = "IP of the optional PSC endpoint for googleapis.com, or empty string when disabled."
   value       = length(google_compute_global_address.psc_ip) > 0 ? google_compute_global_address.psc_ip[0].address : ""
 }
-
-output "cloud_router_name" {
-  description = "Name of the Cloud Router for NAT, or empty string when disabled."
-  value       = length(google_compute_router.router) > 0 ? google_compute_router.router[0].name : ""
-}
-
-output "cloud_nat_name" {
-  description = "Name of the Cloud NAT gateway, or empty string when disabled."
-  value       = length(google_compute_router_nat.nat) > 0 ? google_compute_router_nat.nat[0].name : ""
-}

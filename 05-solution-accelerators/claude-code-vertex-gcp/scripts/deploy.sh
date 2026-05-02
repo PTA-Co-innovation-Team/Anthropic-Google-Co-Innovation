@@ -99,7 +99,9 @@ log_step "gather configuration"
 
 # Project ID.
 default_project="$(gcloud config get-value project 2>/dev/null || true)"
-read -rp "GCP project ID [${default_project}]: " PROJECT_ID </dev/tty
+if [[ -z "${PROJECT_ID:-}" ]]; then
+  read -rp "GCP project ID [${default_project}]: " PROJECT_ID </dev/tty
+fi
 PROJECT_ID="${PROJECT_ID:-${default_project}}"
 if [[ -z "${PROJECT_ID}" ]]; then
   log_error "project_id is required."
@@ -118,27 +120,30 @@ _ask_bool() {
   reply="${reply:-${default}}"
   [[ "${reply,,}" =~ ^(y|yes|true|1)$ ]] && echo "true" || echo "false"
 }
-ENABLE_LLM="$(_ask_bool "Deploy LLM gateway?" true)"
-ENABLE_MCP="$(_ask_bool "Deploy MCP gateway?" true)"
-ENABLE_PORTAL="$(_ask_bool "Deploy dev portal?" true)"
-ENABLE_VM="$(_ask_bool "Deploy dev VM (costs money)?" false)"
-ENABLE_OBS="$(_ask_bool "Install observability (log sink + BQ)?" true)"
-ENABLE_GLB="$(_ask_bool "Deploy Global Load Balancer? (enables access-token auth, ~\$18/month)" false)"
+ENABLE_LLM="${ENABLE_LLM:-$(_ask_bool "Deploy LLM gateway?" true)}"
+ENABLE_MCP="${ENABLE_MCP:-$(_ask_bool "Deploy MCP gateway?" true)}"
+ENABLE_PORTAL="${ENABLE_PORTAL:-$(_ask_bool "Deploy dev portal?" true)}"
+ENABLE_VM="${ENABLE_VM:-$(_ask_bool "Deploy dev VM (costs money)?" false)}"
+ENABLE_OBS="${ENABLE_OBS:-$(_ask_bool "Install observability (log sink + BQ)?" true)}"
 
-ENABLE_VPC_INTERNAL="false"
-if [[ "${ENABLE_GLB}" == "false" ]]; then
-  ENABLE_VPC_INTERNAL="$(_ask_bool "Restrict ingress to VPC-internal only? (developers access via dev VM + IAP SSH)" false)"
-fi
+# --- IAP for browser services (Dev Portal + Admin Dashboard) ---------------
+# IAP is independent of GLB conceptually but only the GLB path is fully
+# automated today (Cloud-Run-direct IAP would be option B and we explicitly
+# skipped it). So picking IAP here implies GLB.
+echo "" >&2
+echo "IAP (Identity-Aware Proxy) for browser services (Dev Portal + Admin Dashboard):" >&2
+echo "  - Adds browser-based Google OAuth in front of the dev portal and admin dashboard." >&2
+echo "  - Required for production-grade access control on browser surfaces." >&2
+echo "  - Implemented today only via the Global Load Balancer (~\$18/month)." >&2
+echo "  - Skip if you only need the API gateways (LLM + MCP)." >&2
+echo "" >&2
+ENABLE_IAP="${ENABLE_IAP:-$(_ask_bool "Enable IAP for browser services? (recommended for production)" false)}"
 
-if [[ "${ENABLE_VPC_INTERNAL}" == "true" ]]; then
-  echo "" >&2
-  echo "VPC-internal mode: Cloud Run services are only reachable from within the VPC." >&2
-  echo "Developer access is via the dev VM (accessed through IAP SSH tunneling)." >&2
-  echo "No VPN is required." >&2
-  echo "" >&2
-  if [[ "${ENABLE_VM}" == "false" ]]; then
-    ENABLE_VM="$(_ask_bool "Dev VM is recommended for VPC-internal mode (IAP SSH access). Deploy it?" true)"
-  fi
+if [[ "${ENABLE_IAP}" == "true" ]]; then
+  ENABLE_GLB=true
+  log_info "IAP enabled — GLB will also be deployed (required by IAP)"
+else
+  ENABLE_GLB="${ENABLE_GLB:-$(_ask_bool "Deploy Global Load Balancer alone? (custom domain only, no IAP, ~\$18/month)" false)}"
 fi
 
 GLB_DOMAIN=""
@@ -171,10 +176,16 @@ if [[ "${ENABLE_GLB}" == "true" ]]; then
     GLB_CERT_MODE="self-signed"
   fi
 
-  if [[ "${ENABLE_PORTAL}" == "true" ]]; then
+  if [[ "${ENABLE_IAP}" == "true" && "${ENABLE_PORTAL}" == "true" ]]; then
     default_support="$(gcloud config get-value account 2>/dev/null || echo "")"
-    read -rp "IAP support email for browser services [${default_support}]: " IAP_SUPPORT_EMAIL </dev/tty
+    echo "" >&2
+    echo "IAP support email — appears on the OAuth consent screen users see at sign-in." >&2
+    read -rp "IAP support email [${default_support}]: " IAP_SUPPORT_EMAIL </dev/tty
     IAP_SUPPORT_EMAIL="${IAP_SUPPORT_EMAIL:-${default_support}}"
+    if [[ -z "${IAP_SUPPORT_EMAIL}" ]]; then
+      log_error "IAP requires a support email. Aborting."
+      exit 1
+    fi
   fi
 fi
 
@@ -183,8 +194,10 @@ echo "" >&2
 echo "Google identities to grant access (comma-separated)." >&2
 echo "Format: user:[email protected], group:[email protected]" >&2
 default_me="user:$(gcloud config get-value account 2>/dev/null || echo [email protected])"
-read -rp "Allowed principals [${default_me}]: " PRINCIPALS_INPUT </dev/tty
-PRINCIPALS_INPUT="${PRINCIPALS_INPUT:-${default_me}}"
+if [[ -z "${PRINCIPALS:-}" ]]; then
+  read -rp "Allowed principals [${default_me}]: " PRINCIPALS_INPUT </dev/tty
+fi
+PRINCIPALS_INPUT="${PRINCIPALS:-${PRINCIPALS_INPUT:-${default_me}}}"
 
 # ----- Write config.yaml ----------------------------------------------------
 CONFIG_OUT="${REPO_ROOT}/config.yaml"
@@ -221,9 +234,6 @@ glb:
   cert_mode: "${GLB_CERT_MODE}"
   iap_support_email: "${IAP_SUPPORT_EMAIL}"
 
-vpc:
-  internal_ingress: ${ENABLE_VPC_INTERNAL}
-
 access:
   allowed_principals:
 ${principals_yaml}
@@ -246,15 +256,9 @@ fi
 
 # ----- Export env for component scripts -------------------------------------
 export PROJECT_ID REGION FALLBACK_REGION
-export ENABLE_LLM ENABLE_MCP ENABLE_PORTAL ENABLE_VM ENABLE_OBS ENABLE_GLB ENABLE_VPC_INTERNAL
+export ENABLE_LLM ENABLE_MCP ENABLE_PORTAL ENABLE_VM ENABLE_OBS ENABLE_GLB ENABLE_IAP
 export GLB_DOMAIN GLB_CERT_MODE IAP_SUPPORT_EMAIL
 export PRINCIPALS="${PRINCIPALS_INPUT}"
-
-# ----- Validate mutual exclusion --------------------------------------------
-if [[ "${ENABLE_GLB}" == "true" && "${ENABLE_VPC_INTERNAL}" == "true" ]]; then
-  log_error "ENABLE_GLB and ENABLE_VPC_INTERNAL are mutually exclusive"
-  exit 1
-fi
 
 # ----- Run component scripts ------------------------------------------------
 log_step "setting gcloud project"

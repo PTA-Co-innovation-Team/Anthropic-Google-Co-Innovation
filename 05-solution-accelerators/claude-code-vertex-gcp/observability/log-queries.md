@@ -6,11 +6,7 @@ advanced-query field. They all filter to just the LLM and MCP gateway
 services. Adjust the time range in the UI.
 
 If you prefer SQL, the same data lives in the BigQuery dataset
-`claude_code_logs`. If BigQuery views have been created (by
-`deploy-observability.sh` or Terraform with `enable_looker_views`),
-you can query `v_recent_requests`, `v_requests_summary`, etc.
-directly — they provide clean column names without `jsonPayload`
-nesting. The raw queries below work regardless of whether views exist.
+`claude_code_logs` — use these as templates and translate.
 
 ---
 
@@ -186,3 +182,78 @@ jsonPayload.upstream_host:*
 Click **Fields** → `jsonPayload.upstream_host` to see a breakdown of
 which Vertex hostnames are receiving traffic. Useful for confirming
 `CLOUD_ML_REGION=global` is actually load-balancing across regions.
+
+---
+
+## 11. Token-debit entries (per-caller usage, gzip-aware)
+
+Every successful Claude response emits one `token_debit` entry once
+the gateway has read Vertex's `usage` field. The gateway decompresses
+gzip and parses both rawPredict and streaming SSE shapes, so this
+entry is reliable regardless of `Content-Encoding`.
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="llm-gateway"
+jsonPayload.message="token_debit"
+```
+
+Each entry carries `caller`, `input_tokens`, `output_tokens`, and
+`total_tokens`. Only emitted when `TOKEN_LIMIT_PER_MIN` is set (off
+by default). This is the data backing the dashboard's
+`tokens-by-caller` and `token-burn-rate` panels.
+
+**BigQuery — top token consumers, last 24h:**
+
+```sql
+SELECT
+  jsonPayload.caller AS caller,
+  SUM(SAFE_CAST(jsonPayload.input_tokens  AS INT64)) AS in_tok,
+  SUM(SAFE_CAST(jsonPayload.output_tokens AS INT64)) AS out_tok,
+  SUM(SAFE_CAST(jsonPayload.total_tokens  AS INT64)) AS total_tok,
+  COUNT(*) AS calls
+FROM `<PROJECT>.claude_code_logs.run_googleapis_com_stdout`
+WHERE jsonPayload.message = "token_debit"
+  AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+GROUP BY caller
+ORDER BY total_tok DESC
+LIMIT 25
+```
+
+---
+
+## 12. Token-cap rejections (429s from the per-caller token bucket)
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="llm-gateway"
+jsonPayload.message="token_limited"
+```
+
+Each entry has `caller`, `estimated_input_tokens`, and `retry_after_s`.
+Backs the dashboard's `token-limit-rejections` panel. A run of these
+from one caller usually means their cap is too tight; from many
+callers, the project-wide cap may need raising.
+
+---
+
+## 13. Settings-tab audit trail
+
+Every successful Settings-tab POST emits one `policy_change` WARNING
+entry from the dashboard service. Pair with Cloud Run's own
+admin-activity log for a two-source audit trail.
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="admin-dashboard"
+jsonPayload.message="policy_change"
+```
+
+Fields: `editor` (the IAP-asserted email that made the change) and
+`diff` (the env-var keys and new values). For denied attempts:
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="admin-dashboard"
+jsonPayload.message=~"policy_edit_denied|no IAP-authenticated"
+```

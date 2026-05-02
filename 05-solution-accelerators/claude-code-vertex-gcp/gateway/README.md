@@ -126,34 +126,37 @@ provided by the attached service account automatically.
 | `VERTEX_PROJECT_ID` | Override for `GOOGLE_CLOUD_PROJECT` if logs need a different value. | *(unset)* |
 | `ENABLE_TOKEN_VALIDATION` | Set to `1` to enable app-level token validation middleware. Always enabled in production (`1`). When `0`, middleware is not registered (local dev only). | `1` |
 | `ALLOWED_PRINCIPALS` | Comma-separated emails allowed to call the gateway (e.g. `user@example.com,sa@proj.iam.gserviceaccount.com`). Only checked when token validation is enabled. Empty = any valid Google token accepted. | *(empty)* |
+| `RATE_LIMIT_PER_MIN` | Per-caller request cap, requests per minute. 0 / unset disables. Implemented in `app/rate_limit.py`. | `0` |
+| `RATE_LIMIT_BURST` | Per-caller burst capacity. Defaults to `RATE_LIMIT_PER_MIN` if unset. | `RATE_LIMIT_PER_MIN` |
+| `TOKEN_LIMIT_PER_MIN` | Per-caller LLM-token cap (input + output) per minute. 0 / unset disables. Implemented in `app/token_limit.py`. Pre-charge based on input-token estimate; post-charge debit reads `usage` from Vertex's response. First-over-cap request passes; next is blocked. | `0` |
+| `TOKEN_LIMIT_BURST` | Per-caller token-bucket burst capacity. Defaults to `TOKEN_LIMIT_PER_MIN`. | `TOKEN_LIMIT_PER_MIN` |
+| `ALLOWED_MODELS` | CSV allowlist of full model strings (e.g. `claude-sonnet-4-6,claude-haiku-4-5`). Requests for any other model return 403 `model_not_allowed`. Empty = no restriction. Implemented in `app/model_policy.py`. | *(empty)* |
+| `MODEL_REWRITE` | CSV of `from=to` rules (e.g. `claude-opus-4-6=claude-sonnet-4-6`). Gateway swaps the model in the URL before forwarding. Useful for forced migrations and manual swap when a model is offline. Empty = no rewrites. | *(empty)* |
 
-## Deployment settings
-
-The deploy scripts set the Cloud Run service up like this:
-
-| Setting | Standard mode | GLB mode | VPC internal mode | Why |
-| --- | --- | --- | --- | --- |
-| Ingress | `all` | `internal-and-cloud-load-balancing` | `internal` | Standard: laptops reach directly. GLB: only GLB can reach it. VPC internal: only VPC clients can reach it. |
-| Auth | `--no-invoker-iam-check` | *(same)* | *(same)* | Cloud Run IAM disabled; app-level token validation handles auth. |
-| Env: `ENABLE_TOKEN_VALIDATION` | `1` | `1` | `1` | Activates `token_validation.py` middleware (always on). |
-| Env: `ALLOWED_PRINCIPALS` | comma-separated emails | *(same)* | *(same)* | Restricts which Google identities can call the gateway. |
-| VPC Connector | optional | optional | **forced on** | Required for Private Google Access egress in VPC internal mode. |
-| Service account | dedicated SA with `roles/aiplatform.user` + `roles/logging.logWriter` | *(same)* | *(same)* | Least privilege. |
-
-VPC internal mode is mutually exclusive with GLB mode.
-
----
+> **Editing these on a running deployment.** All four are env vars on
+> the Cloud Run service, so an operator can change them via the
+> [Cloud Run console](https://console.cloud.google.com/run) (Edit &
+> Deploy New Revision → Variables & Secrets) or via
+> `gcloud run services update --update-env-vars`. Cloud Run rolls a
+> new revision in ~30 sec; the audit-log entry naming the operator is
+> automatic. See the user guide section 9.6 for the canonical
+> "Opus is offline → reroute to Sonnet" runbook.
 
 ## Extending
 
-This gateway is intentionally minimal. Places to extend:
+This gateway is intentionally minimal. The four traffic-policy controls
+above are shipped; the items below are anticipated future extensions:
 
-* **Per-user rate limiting.** Use Cloud Armor or add a simple Redis-backed
-  token-bucket in `proxy.py`.
-* **Prompt auditing.** Hash the request body (don't log it in clear text —
-  it contains user source code) and emit the hash in the structured log.
-* **Model whitelisting.** Reject requests whose `model` doesn't match an
-  allowlist — add the check in `proxy.py` before forwarding.
+* **Cross-instance rate limiting.** Replace the in-process LRU in
+  `rate_limit.py` with Cloud Memorystore (Redis) for exact per-caller
+  enforcement at scale. Hot path is one INCR + one EXPIRE.
+* **Automatic failover.** Try the requested model; on 429/503 retry
+  against a configured fallback. Distinct from the shipped manual
+  `MODEL_REWRITE` because the fallback only kicks in on upstream
+  error. Touches the streaming-response path; needs careful design.
+* **Prompt auditing.** Hash the request body (don't log it in clear
+  text — it contains user source code) and emit the hash in the
+  structured log.
 
-Anything heavier than that probably belongs in a separate service rather
-than in the pass-through proxy.
+Anything heavier than that probably belongs in a separate service
+rather than in the pass-through proxy.

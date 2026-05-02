@@ -38,6 +38,16 @@ parse_common_flags "$@"
 : "${FALLBACK_REGION:?FALLBACK_REGION must be set}"
 : "${PRINCIPALS:=}"
 
+# --- VPC selection (B-mode override) ----------------------------------------
+# By default, the dev VM lands on the project's `default` VPC (and the
+# script auto-creates one if missing). To use a pre-existing VPC instead,
+# export NETWORK_NAME (and optionally SUBNET_NAME) before running. Set
+# SKIP_NAT=true if your VPC already has Cloud NAT in the region — the
+# script will leave it alone instead of creating a duplicate.
+: "${NETWORK_NAME:=default}"
+: "${SUBNET_NAME:=}"
+: "${SKIP_NAT:=false}"
+
 require_cmd gcloud
 require_cmd envsubst
 REPO_ROOT="$(resolve_repo_root)"
@@ -65,59 +75,78 @@ for role in roles/aiplatform.user roles/logging.logWriter; do
     --member="serviceAccount:${SA_EMAIL}" --role="${role}" --condition=None --quiet
 done
 
-# --- Private Google Access ---------------------------------------------------
-# The VM has no public IP, so the subnet needs PGA enabled for the VM to
-# reach Cloud Run services (*.run.app) and Google APIs.
-log_step "ensure Private Google Access on default subnet"
-_pga="$(gcloud compute networks subnets describe default \
-  --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
-  --format="value(privateIpGoogleAccess)" 2>/dev/null || echo "")"
-if [[ "${_pga}" != "True" ]]; then
-  run_cmd gcloud compute networks subnets update default \
-    --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
-    --enable-private-ip-google-access
-else
-  log_info "Private Google Access already enabled"
+# --- VPC (idempotent) -------------------------------------------------------
+# Default behavior: use the project's `default` VPC and auto-create it if
+# missing. Override behavior: NETWORK_NAME=my-vpc → use my-vpc, fail loud if
+# it doesn't exist. We deliberately don't auto-create a customer-named
+# network — that's their territory.
+log_step "ensure network ${NETWORK_NAME} exists"
+if ! gcloud compute networks describe "${NETWORK_NAME}" \
+     --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  if [[ "${NETWORK_NAME}" == "default" ]]; then
+    log_info "default VPC missing — creating in auto-mode"
+    run_cmd gcloud compute networks create default \
+      --project "${PROJECT_ID}" --subnet-mode=auto
+  else
+    log_error "network '${NETWORK_NAME}' does not exist in ${PROJECT_ID}"
+    log_error "  create it first, or unset NETWORK_NAME to use the default VPC"
+    exit 1
+  fi
 fi
 
-# --- Cloud NAT (egress to non-Google hosts) ---------------------------------
-# The VM has no public IP and PGA only covers Google APIs. Cloud NAT
-# provides outbound internet access so the startup script can reach
-# deb.debian.org, registry.npmjs.org, deb.nodesource.com, etc.
-log_step "ensure Cloud Router + Cloud NAT for dev VM egress"
+# Validate SUBNET_NAME when given (custom-mode VPCs need an explicit subnet).
+if [[ -n "${SUBNET_NAME}" ]]; then
+  if ! gcloud compute networks subnets describe "${SUBNET_NAME}" \
+       --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+       >/dev/null 2>&1; then
+    log_error "subnet '${SUBNET_NAME}' not found in ${FALLBACK_REGION}"
+    exit 1
+  fi
+fi
 
-ROUTER_NAME="claude-code-router"
+# --- Cloud Router + NAT (idempotent unless SKIP_NAT) ------------------------
+# The dev VM is created with --no-address (no public IP). Without NAT, the
+# VM cannot reach the public internet, which makes apt and npm fail and the
+# startup script bail at exit 100. Provision a Cloud Router + NAT in the
+# VM's region on the chosen network. Skip if SKIP_NAT=true.
+NAT_ROUTER="claude-code-nat-router"
 NAT_NAME="claude-code-nat"
-
-if ! gcloud compute routers describe "${ROUTER_NAME}" \
-     --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" >/dev/null 2>&1; then
-  run_cmd gcloud compute routers create "${ROUTER_NAME}" \
-    --project "${PROJECT_ID}" \
-    --region "${FALLBACK_REGION}" \
-    --network default
+if [[ "${SKIP_NAT}" == "true" ]]; then
+  log_info "SKIP_NAT=true — leaving Cloud NAT alone (you must have one already)"
 else
-  log_info "Cloud Router ${ROUTER_NAME} already exists"
-fi
-
-if ! gcloud compute routers nats describe "${NAT_NAME}" \
-     --router "${ROUTER_NAME}" \
-     --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" >/dev/null 2>&1; then
-  run_cmd gcloud compute routers nats create "${NAT_NAME}" \
-    --router "${ROUTER_NAME}" \
-    --project "${PROJECT_ID}" \
-    --region "${FALLBACK_REGION}" \
-    --auto-allocate-nat-external-ips \
-    --nat-all-subnet-ip-ranges
-else
-  log_info "Cloud NAT ${NAT_NAME} already exists"
+  log_step "ensure Cloud Router + NAT for dev VM internet egress (network=${NETWORK_NAME})"
+  if ! gcloud compute routers describe "${NAT_ROUTER}" \
+       --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+       >/dev/null 2>&1; then
+    run_cmd gcloud compute routers create "${NAT_ROUTER}" \
+      --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+      --network "${NETWORK_NAME}"
+  fi
+  if ! gcloud compute routers nats describe "${NAT_NAME}" \
+       --router "${NAT_ROUTER}" \
+       --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+       >/dev/null 2>&1; then
+    run_cmd gcloud compute routers nats create "${NAT_NAME}" \
+      --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
+      --router "${NAT_ROUTER}" \
+      --nat-all-subnet-ip-ranges \
+      --auto-allocate-nat-external-ips
+  fi
 fi
 
 # --- IAP firewall rule ------------------------------------------------------
-log_step "ensure IAP SSH firewall rule"
-if ! gcloud compute firewall-rules describe allow-iap-ssh \
+# Firewall name is suffixed with the network when not default, so an
+# existing default-network rule on the same project doesn't collide.
+FW_NAME="allow-iap-ssh"
+if [[ "${NETWORK_NAME}" != "default" ]]; then
+  FW_NAME="allow-iap-ssh-${NETWORK_NAME}"
+fi
+log_step "ensure IAP SSH firewall rule (${FW_NAME} on ${NETWORK_NAME})"
+if ! gcloud compute firewall-rules describe "${FW_NAME}" \
      --project "${PROJECT_ID}" >/dev/null 2>&1; then
-  run_cmd gcloud compute firewall-rules create allow-iap-ssh \
+  run_cmd gcloud compute firewall-rules create "${FW_NAME}" \
     --project "${PROJECT_ID}" \
+    --network="${NETWORK_NAME}" \
     --direction=INGRESS \
     --action=ALLOW \
     --rules=tcp:22 \
@@ -172,7 +201,13 @@ sed 's/\$\${/$__SHELL__/g' "${REPO_ROOT}/terraform/modules/dev_vm/startup.sh.tpl
   > "${STARTUP_FILE}"
 
 # --- Create the VM (idempotent: skip if it exists) --------------------------
-log_step "ensure GCE VM ${VM_NAME}"
+log_step "ensure GCE VM ${VM_NAME} on ${NETWORK_NAME}${SUBNET_NAME:+ / ${SUBNET_NAME}}"
+# Build network/subnet flags. Default VPC is auto-mode so we only need
+# --network. Custom VPCs typically want both --network and --subnet.
+_NET_FLAGS=("--network=${NETWORK_NAME}")
+if [[ -n "${SUBNET_NAME}" ]]; then
+  _NET_FLAGS+=("--subnet=${SUBNET_NAME}")
+fi
 if ! gcloud compute instances describe "${VM_NAME}" \
      --project "${PROJECT_ID}" --zone "${ZONE}" >/dev/null 2>&1; then
   run_cmd gcloud compute instances create "${VM_NAME}" \
@@ -184,21 +219,13 @@ if ! gcloud compute instances describe "${VM_NAME}" \
     --service-account "${SA_EMAIL}" \
     --scopes cloud-platform \
     --no-address \
+    "${_NET_FLAGS[@]}" \
     --tags claude-code-dev-vm \
     --metadata enable-oslogin=TRUE \
     --metadata-from-file "startup-script=${STARTUP_FILE}" \
     --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring
 else
   log_info "VM already exists, leaving alone (re-run teardown.sh to recreate)"
-fi
-
-# --- Grant VM SA run.invoker on dashboard (if deployed) --------------------
-if gcloud run services describe admin-dashboard \
-     --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" >/dev/null 2>&1; then
-  log_step "grant VM SA invoker on admin-dashboard"
-  run_cmd gcloud run services add-iam-policy-binding admin-dashboard \
-    --project "${PROJECT_ID}" --region "${FALLBACK_REGION}" \
-    --member="serviceAccount:${SA_EMAIL}" --role="roles/run.invoker" --quiet
 fi
 
 # --- Grant IAP tunnel + OS Login to each principal --------------------------

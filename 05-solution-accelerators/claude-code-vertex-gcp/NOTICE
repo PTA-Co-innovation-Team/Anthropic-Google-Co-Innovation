@@ -1,0 +1,34 @@
+Claude Code on Google Cloud via Vertex AI — Reference Gateway
+==============================================================
+
+This delivery package is a redistribution of the open-source reference
+architecture published at:
+
+    github.com/PTA-Co-innovation-Team/Anthropic-Google-Co-Innovation
+    Path: 05-solution-accelerators/claude-code-vertex-gcp
+
+The upstream code is licensed under the Apache License, Version 2.0
+(see LICENSE). All original copyright notices, code comments, and
+attribution have been preserved verbatim in the source files.
+
+Additions in this delivery package
+----------------------------------
+
+The following files are NEW and were added on top of the upstream tree
+to make customer hand-off and deployment-time reliability easier:
+
+    INSTALL.sh                  Wrapper: preflight → deploy → e2e.
+    scripts/preflight.sh        Read-only pre-deployment validator.
+    CUSTOMER-RUNBOOK.md         Single-page deployment runbook.
+    HANDOVER-PACKET.md          Internal partner-team handover document.
+    BLESS.md                    What to verify before customer hand-off.
+
+These additions do not modify the upstream code. They are also
+Apache-2.0 licensed (matching the parent project).
+
+Trademarks
+----------
+
+"Google", "Google Cloud", "Vertex AI", "Anthropic", and "Claude" are
+trademarks of their respective owners. No endorsement is implied by
+this redistribution.

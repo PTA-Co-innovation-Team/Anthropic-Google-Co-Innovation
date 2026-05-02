@@ -3,11 +3,10 @@
 # e2e-test.sh — end-to-end validation of a deployed stack.
 #
 # Run this immediately after a deployment to confirm everything works.
-# The script is structured as eight layers: infrastructure, network path,
-# gateway proxy, dev portal, MCP, negative + observability (incl. BigQuery
-# views), GLB, and IAP access. Each layer has one or more test functions;
-# each function records PASS / FAIL / SKIP and the script exits non-zero
-# if any FAIL.
+# The script is structured as six "layers" corresponding to the
+# validation layers in TEST-AND-DEMO-PLAN.md. Each layer has one or
+# more test functions; each function records PASS / FAIL / SKIP and
+# the script exits non-zero if any FAIL.
 #
 # Modes:
 #   * default  — runs every automatable test.
@@ -119,23 +118,6 @@ log_info "mcp gateway: ${MCP_URL:-<not deployed>}"
 log_info "dev portal:  ${PORTAL_URL:-<not deployed>}"
 log_info "dashboard:   ${DASHBOARD_URL:-<not deployed>}"
 log_info "GLB:         ${GLB_URL:-<not configured>}"
-
-# --- Reachability pre-check --------------------------------------------------
-# If the gateway uses internal-only ingress and we're running from outside
-# the VPC, all network tests will fail. Detect early and exit with guidance.
-if [[ -n "${GATEWAY_URL}" ]]; then
-  _probe="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 \
-              "${GATEWAY_URL%/}/healthz" 2>/dev/null || echo "000")"
-  if [[ "${_probe}" == "000" ]]; then
-    log_warn "gateway unreachable at ${GATEWAY_URL}"
-    log_warn "if using VPC-internal ingress:"
-    log_warn "  1. SSH into the dev VM: gcloud compute ssh claude-code-dev-shared --tunnel-through-iap --project=${PROJECT_ID} --zone=${CR_REGION}-a"
-    log_warn "  2. Run this script from the dev VM (it is inside the VPC)"
-    log_warn "  3. Or, if GLB is deployed, pass --gateway-url with the GLB URL"
-    log_warn "No VPN required."
-    exit 2
-  fi
-fi
 
 # -----------------------------------------------------------------------------
 # Test tracking
@@ -354,66 +336,6 @@ test_6_4_dashboard_api() {
   fi
 }
 
-test_6_5_bigquery_views_exist() {
-  local token status
-  token="$(gcloud auth application-default print-access-token 2>/dev/null)"
-  [[ -n "${token}" ]] || { echo "no ADC token"; return 1; }
-  status=$(curl -sS -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer ${token}" \
-    "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/claude_code_logs" 2>/dev/null)
-  [[ "${status}" == "200" ]] || { echo "dataset claude_code_logs not found"; return 2; }
-
-  local views=("v_requests_summary" "v_error_analysis" "v_latency_stats" "v_top_callers" "v_recent_requests")
-  local missing=""
-  for view in "${views[@]}"; do
-    local code
-    code=$(curl -sS -o /dev/null -w "%{http_code}" \
-      -H "Authorization: Bearer ${token}" \
-      "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/claude_code_logs/tables/${view}" 2>/dev/null)
-    [[ "${code}" == "200" ]] || missing+="${view} "
-  done
-  if [[ -n "${missing}" ]]; then
-    echo "views not found: ${missing}(deploy-observability.sh creates them after first gateway request)"
-    return 2
-  fi
-}
-
-test_6_6_bigquery_view_queryable() {
-  local token
-  token="$(gcloud auth application-default print-access-token 2>/dev/null)"
-  [[ -n "${token}" ]] || { echo "no ADC token"; return 1; }
-  local code
-  code=$(curl -sS -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer ${token}" \
-    "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/datasets/claude_code_logs/tables/v_recent_requests" 2>/dev/null)
-  [[ "${code}" == "200" ]] || { echo "v_recent_requests not found"; return 2; }
-
-  local query_payload query_resp http_code
-  query_payload="{\"query\":\"SELECT COUNT(*) AS cnt FROM \\\`${PROJECT_ID}.claude_code_logs.v_recent_requests\\\`\",\"useLegacySql\":false}"
-  query_resp=$(curl -sS -w "\n%{http_code}" -X POST \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json" \
-    "https://bigquery.googleapis.com/bigquery/v2/projects/${PROJECT_ID}/queries" \
-    -d "${query_payload}" 2>/dev/null)
-  http_code="$(echo "${query_resp}" | tail -1)"
-  [[ "${http_code}" =~ ^2 ]] || { echo "view query failed (HTTP ${http_code})"; return 1; }
-}
-
-test_6_7_dashboard_independent_of_views() {
-  [[ -n "${DASHBOARD_URL}" ]] || { echo "dashboard not deployed"; return 2; }
-  local token status body
-  token="$(_get_token "${DASHBOARD_URL}")"
-  status=$(curl -sS -o /tmp/e2e_dash_indep.json -w "%{http_code}" \
-    -H "Authorization: Bearer ${token}" \
-    "${DASHBOARD_URL%/}/api/recent-requests?limit=5" 2>/dev/null)
-  [[ "${status}" == "200" ]] || { echo "dashboard API returned ${status}"; return 1; }
-  body=$(cat /tmp/e2e_dash_indep.json 2>/dev/null)
-  if ! echo "${body}" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-    echo "dashboard API returned invalid JSON (independence test)"
-    return 1
-  fi
-}
-
 # -----------------------------------------------------------------------------
 # Layer 2 — Network path (direct Vertex)
 # -----------------------------------------------------------------------------
@@ -621,81 +543,6 @@ test_7_5_glb_unauth_rejected() {
 }
 
 # -----------------------------------------------------------------------------
-# Layer 8 — IAP Access Mechanisms
-# -----------------------------------------------------------------------------
-test_8_1_iap_ssh_firewall_rule() {
-  if ! gcloud compute instances describe claude-code-dev-shared \
-       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
-    echo "no dev VM deployed"; return 2
-  fi
-  if ! gcloud compute firewall-rules describe allow-iap-ssh \
-       --project "${PROJECT_ID}" >/dev/null 2>&1; then
-    echo "allow-iap-ssh firewall rule missing — IAP SSH tunneling will fail"
-    return 1
-  fi
-}
-
-test_8_2_iap_tunnel_iam_bindings() {
-  if ! gcloud compute instances describe claude-code-dev-shared \
-       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
-    echo "no dev VM deployed"; return 2
-  fi
-  local bindings
-  bindings=$(gcloud projects get-iam-policy "${PROJECT_ID}" \
-    --flatten="bindings[].members" \
-    --filter="bindings.role=roles/iap.tunnelResourceAccessor" \
-    --format="value(bindings.members)" 2>/dev/null || true)
-  [[ -n "${bindings}" ]] || { echo "no principals with roles/iap.tunnelResourceAccessor"; return 1; }
-}
-
-test_8_3_dev_vm_reaches_gateway() {
-  if ! gcloud compute instances describe claude-code-dev-shared \
-       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
-    echo "no dev VM deployed"; return 2
-  fi
-  [[ -n "${GATEWAY_URL}" ]] || return 2
-  local status
-  status=$(gcloud compute ssh claude-code-dev-shared \
-    --project "${PROJECT_ID}" --zone "${CR_REGION}-a" \
-    --tunnel-through-iap --command \
-    "curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 '${GATEWAY_URL%/}/healthz'" \
-    2>/dev/null || echo "000")
-  [[ "${status}" == "200" ]] || { echo "dev VM cannot reach gateway (status=${status})"; return 1; }
-}
-
-test_8_4_cloud_nat_exists() {
-  if ! gcloud compute instances describe claude-code-dev-shared \
-       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
-    echo "no dev VM deployed"; return 2
-  fi
-  if ! gcloud compute routers describe claude-code-router \
-       --project "${PROJECT_ID}" --region "${CR_REGION}" >/dev/null 2>&1; then
-    echo "Cloud Router claude-code-router not found in ${CR_REGION}"
-    return 1
-  fi
-  if ! gcloud compute routers nats describe claude-code-nat \
-       --router claude-code-router \
-       --project "${PROJECT_ID}" --region "${CR_REGION}" >/dev/null 2>&1; then
-    echo "Cloud NAT claude-code-nat not found on router claude-code-router"
-    return 1
-  fi
-}
-
-test_8_5_dev_vm_reaches_internet() {
-  if ! gcloud compute instances describe claude-code-dev-shared \
-       --project "${PROJECT_ID}" --zone "${CR_REGION}-a" >/dev/null 2>&1; then
-    echo "no dev VM deployed"; return 2
-  fi
-  local status
-  status=$(gcloud compute ssh claude-code-dev-shared \
-    --project "${PROJECT_ID}" --zone "${CR_REGION}-a" \
-    --tunnel-through-iap --command \
-    "curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 'https://registry.npmjs.org/'" \
-    2>/dev/null || echo "000")
-  [[ "${status}" == "200" ]] || { echo "dev VM cannot reach registry.npmjs.org (status=${status}). Cloud NAT may not be configured."; return 1; }
-}
-
-# -----------------------------------------------------------------------------
 # Execute
 # -----------------------------------------------------------------------------
 log_step "Layer 1 — Infrastructure"
@@ -745,9 +592,6 @@ if [[ "${QUICK}" == "0" ]]; then
   run_test "6.2 dev VM has no external IP"        test_6_2_no_external_ip_on_vm
   run_test "6.3 dashboard /health responds"       test_6_3_dashboard_health
   run_test "6.4 dashboard API returns JSON"       test_6_4_dashboard_api
-  run_test "6.5 BigQuery views exist"              test_6_5_bigquery_views_exist
-  run_test "6.6 BigQuery view is queryable"        test_6_6_bigquery_view_queryable
-  run_test "6.7 dashboard works independently of views" test_6_7_dashboard_independent_of_views
 fi
 
 if [[ -n "${GLB_URL}" ]]; then
@@ -760,16 +604,6 @@ if [[ -n "${GLB_URL}" ]]; then
   run_test "7.5 GLB unauth rejected"               test_7_5_glb_unauth_rejected
 fi
 
-log_step "Layer 8 — IAP Access"
-CURRENT_LAYER="Layer 8: IAP Access"
-run_test "8.1 IAP SSH firewall rule exists"        test_8_1_iap_ssh_firewall_rule
-run_test "8.2 IAP tunnel IAM bindings configured"  test_8_2_iap_tunnel_iam_bindings
-if [[ "${QUICK}" == "0" ]]; then
-  run_test "8.3 dev VM can reach gateway internally" test_8_3_dev_vm_reaches_gateway
-  run_test "8.4 Cloud NAT exists for dev VM"         test_8_4_cloud_nat_exists
-  run_test "8.5 dev VM can reach non-Google hosts"   test_8_5_dev_vm_reaches_internet
-fi
-
 # -----------------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------------
@@ -777,7 +611,7 @@ echo "" >&2
 echo "================================================================" >&2
 echo "  E2E Test Results" >&2
 echo "================================================================" >&2
-for layer in "Layer 1: Infrastructure" "Layer 2: Network Path" "Layer 3: Gateway Proxy" "Layer 4: Dev Portal" "Layer 5: MCP Tools" "Layer 6: Negative + Obs" "Layer 7: GLB" "Layer 8: IAP Access"; do
+for layer in "Layer 1: Infrastructure" "Layer 2: Network Path" "Layer 3: Gateway Proxy" "Layer 4: Dev Portal" "Layer 5: MCP Tools" "Layer 6: Negative + Obs" "Layer 7: GLB"; do
   local_pass=${LAYER_PASS[$layer]:-0}
   local_fail=${LAYER_FAIL[$layer]:-0}
   local_skip=${LAYER_SKIP[$layer]:-0}

@@ -124,3 +124,22 @@ a:hover { text-decoration: underline; }
   header h1 { font-size: 1.4rem; }
   .scorecard .value { font-size: 1.5rem; }
 }
+
+/* Tabs (added with the L3 settings tab) */
+.tabs { display: flex; gap: 8px; margin-top: 16px; border-bottom: 1px solid #e0e0e0; }
+.tab { background: none; border: 0; padding: 10px 20px; cursor: pointer; font-size: 14px; color: #5f6368; border-bottom: 3px solid transparent; }
+.tab.active { color: #1a73e8; border-bottom-color: #1a73e8; font-weight: 600; }
+.tab:hover { color: #1a73e8; }
+
+/* Settings form */
+#policy-form fieldset { border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin: 12px 0; }
+#policy-form legend { font-weight: 600; padding: 0 8px; color: #202124; }
+#policy-form label { display: block; margin: 8px 0; font-size: 14px; color: #202124; }
+#policy-form label small { color: #5f6368; font-weight: normal; margin-left: 6px; }
+#policy-form input { display: block; width: 100%; max-width: 600px; padding: 8px 12px; margin-top: 4px; border: 1px solid #d0d0d0; border-radius: 6px; font-family: monospace; font-size: 13px; }
+#policy-form input:focus { outline: none; border-color: #1a73e8; box-shadow: 0 0 0 2px rgba(26,115,232,0.2); }
+#save-btn { background: #1a73e8; color: white; border: 0; padding: 10px 20px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 8px; }
+#save-btn:disabled { background: #c0c0c0; cursor: not-allowed; }
+#save-btn:not(:disabled):hover { background: #1557b0; }
+#save-result { margin-left: 12px; }
+.muted { color: #5f6368; font-size: 13px; }

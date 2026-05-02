@@ -2,7 +2,7 @@
 
 Cloud Logging auto-parses JSON on stdout from Cloud Run containers. Any
 top-level field we emit becomes a structured, queryable field in Cloud
-Logging. This lets the admin dashboard and Looker Studio filter by caller, model,
+Logging. This lets the Looker Studio dashboard filter by caller, model,
 status, latency, etc. without any log-parsing regex.
 
 Why not use ``google-cloud-logging``'s Python handler directly? Because on

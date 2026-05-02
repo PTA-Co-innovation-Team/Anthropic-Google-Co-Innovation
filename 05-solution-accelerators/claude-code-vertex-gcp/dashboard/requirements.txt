@@ -1,5 +1,10 @@
 # Admin dashboard dependencies.
 fastapi>=0.115,<0.120
 uvicorn[standard]>=0.32,<0.40
+pydantic>=2.5,<3.0
 google-cloud-bigquery>=3.25,<4.0
+# Used by the settings tab to mutate llm-gateway env vars via the Cloud
+# Run admin API. The dashboard SA needs roles/run.developer scoped to
+# the llm-gateway service for this call to succeed.
+google-cloud-run>=0.10,<1.0
 google-auth>=2.34,<3.0
